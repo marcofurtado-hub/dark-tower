@@ -1,0 +1,1717 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>DARK TOWER</title>
+<style>
+* { margin: 0; padding: 0; }
+html, body { background: #000; width: 100%; height: 100%; overflow: hidden; }
+canvas { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; cursor: none; }
+</style>
+</head>
+<body>
+<canvas id="screen"></canvas>
+<script>
+'use strict';
+
+// ═══════════════════════════════════════
+//  DARK TOWER — Pixel Art Tower Defense
+//  MEGA UPDATE: Waves, Bosses, Power-ups,
+//  Audio, Weather, Combos
+// ═══════════════════════════════════════
+
+// ── Preload skull PNG for game over screen ──
+const skullImg = new Image();
+skullImg.src = 'skull.png';
+let skullLoaded = false;
+skullImg.onload = () => { skullLoaded = true; };
+
+const W = 640, H = 400;
+const buf = document.createElement('canvas');
+buf.width = W; buf.height = H;
+const g = buf.getContext('2d');
+const scr = document.getElementById('screen');
+const sx = scr.getContext('2d');
+sx.imageSmoothingEnabled = false;
+const F = '"Courier New", monospace';
+const PI = Math.PI;
+
+function resize() {
+  scr.width = innerWidth; scr.height = innerHeight;
+  sx.imageSmoothingEnabled = false;
+}
+addEventListener('resize', resize); resize();
+
+// ── Palette ──
+const C = {
+  bg: '#0a0a0f', dark: '#14141c', mid: '#2a2a35',
+  light: '#8888a0', bone: '#c8c0b0', white: '#e8e0d0',
+  red: '#a03020', red2: '#d04830',
+  gold: '#e8c020', gold2: '#ffd840',
+  cyan: '#40c8e0', green: '#40c040',
+  purple: '#a040d0', blue: '#3060d0',
+};
+
+// ── Ground ──
+const GND = H - 45;
+
+// ── State ──
+let state = 'menu';
+let time = 0, score = 0;
+let hi = +(localStorage.getItem('dt_hi') || 0);
+let cityHP = 20;
+const MAX_HP = 20;
+let gameOverTimer = 0;
+
+// ── Ranking ──
+let ranks = JSON.parse(localStorage.getItem('dt_ranks') || '[]');
+let nameInput = '';
+
+// ── Shake / Freeze ──
+let trauma = 0, shX = 0, shY = 0, freeze = 0;
+
+// ── Combo ──
+let comboCount = 0, comboTimer = 0, comboMult = 1, bestCombo = 0;
+
+// ══════════════════════
+//  WAVE SYSTEM
+// ══════════════════════
+let waveNum = 0, waveType = '', waveTimer = 0, waveSpawnCount = 0;
+let waveActive = false, wavePause = false, wavePauseTimer = 0;
+let waveAnnounce = 0, waveAnnounceTxt = '';
+let bossAlive = null;
+
+// ── Phased difficulty: everything defined per-wave ──
+// Enemies start BIG, SLOW, FEW, WEAK → shrink, speed up, multiply, get tougher
+function waveStats() {
+  const w = waveNum;
+  // Visual scale: 4.0 (huge) → 1.2 (tiny) over ~20 waves
+  const enScale = Math.max(1.2, 4.0 - (w - 1) * 0.14);
+  // Speed: very slow early, ramps up gently
+  const speed = 0.05 + w * 0.02;
+  // HP: 1-2 early, grows steadily
+  const hp = Math.max(1, Math.floor(1 + w * 0.6));
+  // Count: 3 on wave 1, grows steadily
+  const count = Math.min(45, 3 + Math.floor(w * 1.5));
+  // Spawn interval: slow (easy) → fast (hard)
+  const spawnDelay = Math.max(200, 1100 - w * 45);
+  // Pause between waves: long early (breathe) → short later (pressure)
+  const pauseTime = Math.max(2500, 5000 - w * 150);
+  // Max enemy tier unlocked at this wave
+  const maxTier = w <= 3 ? 0 : w <= 6 ? 1 : w <= 9 ? 2 : w <= 12 ? 3 : w <= 16 ? 5 : 7;
+  // Flank chance: enemies from sides increases
+  const flankChance = Math.min(0.5, w * 0.025);
+  // Phase label for HUD
+  let phase;
+  if (w <= 3) phase = 'EASY TARGETS';
+  else if (w <= 6) phase = 'WARMING UP';
+  else if (w <= 9) phase = 'GETTING HARDER';
+  else if (w <= 12) phase = 'INTENSE';
+  else if (w <= 16) phase = 'BRUTAL';
+  else if (w <= 20) phase = 'NIGHTMARE';
+  else phase = 'IMPOSSIBLE';
+  return { enScale, speed, hp, count, spawnDelay, pauseTime, maxTier, flankChance, phase };
+}
+
+function nextWave() {
+  waveNum++;
+  waveType = (waveNum % 5 === 0) ? 'BOSS' : 'NORMAL';
+  waveActive = true;
+  waveSpawnCount = 0;
+  waveAnnounce = 120;
+  if (waveType === 'BOSS') {
+    waveAnnounceTxt = `WAVE ${waveNum}: BOSS INCOMING`;
+    sfx('bossWarn');
+  } else {
+    const ws = waveStats();
+    waveAnnounceTxt = `WAVE ${waveNum}: ${ws.phase}`;
+    sfx('waveStart');
+  }
+}
+
+function getWaveSpawnCount() {
+  if (waveType === 'BOSS') return 1;
+  return waveStats().count;
+}
+
+function getWaveSpawnDelay() {
+  if (waveType === 'BOSS') return 100;
+  return waveStats().spawnDelay;
+}
+
+// ══════════════════════
+//  AUDIO - Web Audio API
+// ══════════════════════
+let audioCtx = null, masterGain = null, musicGain = null;
+let muted = false, volume = 0.5;
+let musicPlaying = false, musicInterval = null;
+
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  masterGain = audioCtx.createGain();
+  masterGain.gain.value = volume;
+  masterGain.connect(audioCtx.destination);
+  musicGain = audioCtx.createGain();
+  musicGain.gain.value = 0.15;
+  musicGain.connect(masterGain);
+}
+
+function playTone(freq, dur, type, vol, dest, detune) {
+  if (muted || !audioCtx) return;
+  const o = audioCtx.createOscillator();
+  const g2 = audioCtx.createGain();
+  o.type = type || 'square';
+  o.frequency.value = freq;
+  if (detune) o.detune.value = detune;
+  g2.gain.value = vol || 0.1;
+  g2.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+  o.connect(g2); g2.connect(dest || masterGain);
+  o.start(); o.stop(audioCtx.currentTime + dur);
+}
+
+function playNoise(dur, vol, dest) {
+  if (muted || !audioCtx) return;
+  const bufSize = audioCtx.sampleRate * dur;
+  const nBuf = audioCtx.createBuffer(1, bufSize, audioCtx.sampleRate);
+  const data = nBuf.getChannelData(0);
+  for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
+  const src = audioCtx.createBufferSource();
+  src.buffer = nBuf;
+  const g2 = audioCtx.createGain();
+  g2.gain.value = vol || 0.08;
+  g2.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+  src.connect(g2); g2.connect(dest || masterGain);
+  src.start();
+}
+
+function sfx(name) {
+  if (muted || !audioCtx) return;
+  const t = audioCtx.currentTime;
+  switch (name) {
+    case 'shoot':
+      playTone(800, 0.06, 'square', 0.06);
+      break;
+    case 'hit':
+      playTone(200, 0.08, 'square', 0.05);
+      break;
+    case 'explode':
+      playNoise(0.25, 0.12);
+      playTone(80, 0.2, 'sawtooth', 0.08);
+      break;
+    case 'kill':
+      playTone(600, 0.06, 'square', 0.06);
+      playTone(400, 0.1, 'square', 0.04);
+      break;
+    case 'upgrade':
+      playTone(400, 0.08, 'square', 0.07);
+      setTimeout(() => playTone(600, 0.08, 'square', 0.07), 60);
+      setTimeout(() => playTone(800, 0.12, 'square', 0.07), 120);
+      break;
+    case 'cityHit':
+      playNoise(0.3, 0.15);
+      playTone(60, 0.3, 'sawtooth', 0.1);
+      break;
+    case 'bossWarn': {
+      const o = audioCtx.createOscillator();
+      const gg = audioCtx.createGain();
+      o.type = 'sawtooth'; o.frequency.value = 80;
+      o.frequency.linearRampToValueAtTime(40, t + 1.5);
+      gg.gain.value = 0.1;
+      gg.gain.linearRampToValueAtTime(0.001, t + 1.5);
+      o.connect(gg); gg.connect(masterGain);
+      o.start(); o.stop(t + 1.5);
+      break;
+    }
+    case 'bossDie':
+      playNoise(0.5, 0.2);
+      playTone(200, 0.15, 'square', 0.1);
+      setTimeout(() => playTone(300, 0.15, 'square', 0.1), 100);
+      setTimeout(() => playTone(500, 0.2, 'square', 0.1), 200);
+      break;
+    case 'gameOver':
+      playTone(400, 0.2, 'square', 0.08);
+      setTimeout(() => playTone(300, 0.2, 'square', 0.08), 200);
+      setTimeout(() => playTone(200, 0.4, 'sawtooth', 0.08), 400);
+      break;
+    case 'powerup':
+      playTone(600, 0.06, 'sine', 0.08);
+      setTimeout(() => playTone(800, 0.06, 'sine', 0.08), 50);
+      setTimeout(() => playTone(1000, 0.06, 'sine', 0.08), 100);
+      setTimeout(() => playTone(1200, 0.1, 'sine', 0.08), 150);
+      break;
+    case 'nuke':
+      playNoise(0.8, 0.25);
+      playTone(40, 0.8, 'sawtooth', 0.15);
+      break;
+    case 'waveStart':
+      playTone(300, 0.1, 'square', 0.06);
+      setTimeout(() => playTone(450, 0.15, 'square', 0.06), 80);
+      break;
+    case 'combo':
+      playTone(700 + comboCount * 50, 0.06, 'sine', 0.05);
+      break;
+  }
+}
+
+// ── Music ──
+const BASS_NOTES = [55, 55, 73.4, 65.4, 55, 55, 73.4, 82.4];
+const MELODY_NOTES = [220, 261.6, 293.7, 261.6, 220, 196, 220, 261.6];
+const BOSS_BASS = [55, 55, 41.2, 49, 55, 55, 41.2, 36.7];
+const BOSS_MELODY = [196, 220, 196, 174.6, 164.8, 174.6, 196, 220];
+let musicStep = 0;
+
+function startMusic() {
+  if (musicPlaying || !audioCtx) return;
+  musicPlaying = true;
+  musicStep = 0;
+  musicInterval = setInterval(() => {
+    if (muted || state !== 'play') return;
+    const isBoss = bossAlive != null;
+    const bass = isBoss ? BOSS_BASS : BASS_NOTES;
+    const mel = isBoss ? BOSS_MELODY : MELODY_NOTES;
+    const idx = musicStep % bass.length;
+    playTone(bass[idx], 0.15, 'triangle', 0.04, musicGain);
+    playTone(mel[idx], 0.12, 'square', 0.025, musicGain);
+    if (musicStep % 2 === 0) playNoise(0.05, 0.02, musicGain);
+    if (time > 60) {
+      playTone(bass[idx] * 2, 0.08, 'square', 0.015, musicGain, 5);
+    }
+    musicStep++;
+  }, 200);
+}
+
+function stopMusic() {
+  musicPlaying = false;
+  if (musicInterval) { clearInterval(musicInterval); musicInterval = null; }
+}
+
+// ══════════════════════
+//  WEATHER SYSTEM
+// ══════════════════════
+let weather = 'clear'; // clear, rain, storm, snow, fog
+let weatherTimer = 0;
+let lightningFlash = 0;
+let rainDrops = [];
+let snowFlakes = [];
+
+function initWeather() {
+  rainDrops = [];
+  for (let i = 0; i < 120; i++) {
+    rainDrops.push({ x: Math.random() * W, y: Math.random() * H, speed: 4 + Math.random() * 4, len: 6 + Math.random() * 8 });
+  }
+  snowFlakes = [];
+  for (let i = 0; i < 80; i++) {
+    snowFlakes.push({ x: Math.random() * W, y: Math.random() * H, speed: 0.3 + Math.random() * 0.7, drift: Math.random() * PI * 2 });
+  }
+}
+
+function updateWeather(dt) {
+  weatherTimer -= dt;
+  if (weatherTimer <= 0) {
+    const r = Math.random();
+    if (waveNum < 3) weather = 'clear';
+    else if (r < 0.3) weather = 'clear';
+    else if (r < 0.55) weather = 'rain';
+    else if (r < 0.7) weather = 'storm';
+    else if (r < 0.85) weather = 'snow';
+    else weather = 'fog';
+    weatherTimer = 15000 + Math.random() * 20000;
+  }
+  if (weather === 'storm' && Math.random() < 0.003) lightningFlash = 8;
+  if (lightningFlash > 0) lightningFlash--;
+}
+
+function drawWeather() {
+  if (weather === 'rain' || weather === 'storm') {
+    g.strokeStyle = weather === 'storm' ? 'rgba(180,200,255,0.25)' : 'rgba(120,140,180,0.15)';
+    g.lineWidth = 1;
+    const intensity = weather === 'storm' ? 120 : 70;
+    for (let i = 0; i < intensity; i++) {
+      const d = rainDrops[i % rainDrops.length];
+      d.y += d.speed; d.x += 1.5;
+      if (d.y > GND) { d.y = -10; d.x = Math.random() * W; }
+      if (d.x > W) d.x -= W;
+      g.beginPath(); g.moveTo(d.x, d.y); g.lineTo(d.x + 2, d.y + d.len); g.stroke();
+    }
+  }
+  if (weather === 'snow') {
+    g.fillStyle = 'rgba(220,225,240,0.5)';
+    for (const s of snowFlakes) {
+      s.y += s.speed; s.x += Math.sin(Date.now() * 0.001 + s.drift) * 0.4;
+      if (s.y > GND) { s.y = -5; s.x = Math.random() * W; }
+      g.fillRect(Math.floor(s.x), Math.floor(s.y), 2, 2);
+    }
+  }
+  if (weather === 'fog') {
+    g.fillStyle = 'rgba(40,40,60,0.2)';
+    for (let y = GND - 60; y < GND; y += 8) {
+      const a = 0.05 + ((y - (GND - 60)) / 60) * 0.15;
+      g.globalAlpha = a;
+      g.fillRect(0, y, W, 8);
+    }
+    g.globalAlpha = 1;
+  }
+  if (lightningFlash > 0) {
+    g.fillStyle = `rgba(255,255,255,${lightningFlash / 8 * 0.4})`;
+    g.fillRect(0, 0, W, H);
+  }
+}
+
+// ── Input ──
+const keys = {};
+document.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (state === 'name') {
+    e.preventDefault();
+    if (e.code === 'Backspace') nameInput = nameInput.slice(0, -1);
+    else if (e.code === 'Enter' && nameInput.length > 0) { saveRank(); state = 'menu'; stopMusic(); }
+    else if (e.key.length === 1 && nameInput.length < 12) nameInput += e.key.toUpperCase();
+    return;
+  }
+  if (state === 'gameover' && gameOverTimer > 90) {
+    if (e.code === 'Enter' || e.code === 'Space') { state = 'name'; nameInput = ''; }
+    return;
+  }
+  if (e.code === 'Enter' || e.code === 'Space') {
+    if (state === 'menu') { initAudio(); startGame(); }
+  }
+  if (e.code === 'KeyF') {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(() => {});
+    else document.exitFullscreen();
+  }
+  if (e.code === 'KeyM') { muted = !muted; if (muted) stopMusic(); else if (state === 'play') startMusic(); }
+});
+document.addEventListener('keyup', e => keys[e.code] = false);
+
+function saveRank() {
+  ranks.push({ name: nameInput, score, time: Math.floor(time), wave: waveNum, combo: bestCombo });
+  ranks.sort((a, b) => b.score - a.score);
+  ranks = ranks.slice(0, 10);
+  localStorage.setItem('dt_ranks', JSON.stringify(ranks));
+  if (score > hi) { hi = score; localStorage.setItem('dt_hi', hi); }
+}
+
+// ══════════════════════
+//  SPRITES
+// ══════════════════════
+const E_SPR = [
+  [['00111100'],['01111110'],['11111111'],['11100111'],['01111110'],['00100100'],['01001010'],['00100100']],
+  [['00100100'],['01111110'],['11111111'],['11100111'],['11111111'],['01111110'],['01000010'],['10000001']],
+  [['00111100'],['01111110'],['11011011'],['11111111'],['01100110'],['00111100'],['00100100'],['01100110']],
+  [['10000001'],['01011010'],['00111100'],['01111110'],['01111110'],['00111100'],['01011010'],['10000001']],
+  [['00011000'],['00111100'],['01111110'],['11111111'],['11111111'],['01111110'],['00111100'],['01100110']],
+  // Tier 5 - Splitter
+  [['01100110'],['11111111'],['11100111'],['01111110'],['01111110'],['11100111'],['11111111'],['01100110']],
+  // Tier 6 - Shielded
+  [['11111111'],['10000001'],['10111101'],['10110101'],['10110101'],['10111101'],['10000001'],['11111111']],
+  // Tier 7 - Zigzag
+  [['10000001'],['11000011'],['01100110'],['00111100'],['00111100'],['01100110'],['11000011'],['10000001']],
+];
+const E_SPR_B = [
+  [['00111100'],['01111110'],['11111111'],['11100111'],['01111110'],['01001010'],['00100100'],['01001010']],
+  [['01000010'],['01111110'],['11111111'],['11100111'],['11111111'],['01111110'],['00100100'],['10000001']],
+  [['00111100'],['01111110'],['11011011'],['11111111'],['00111100'],['01100110'],['01000010'],['00100100']],
+  [['01000010'],['00111100'],['01111110'],['11111111'],['11111111'],['01111110'],['00111100'],['01000010']],
+  [['00011000'],['00111100'],['11111111'],['01111110'],['01111110'],['11111111'],['00111100'],['01100110']],
+  // Splitter B
+  [['00110011'],['11111111'],['01110111'],['01111110'],['01111110'],['01110111'],['11111111'],['00110011']],
+  // Shielded B
+  [['11111111'],['10000001'],['10111101'],['10101101'],['10101101'],['10111101'],['10000001'],['11111111']],
+  // Zigzag B
+  [['01000010'],['10100101'],['01100110'],['00111100'],['00111100'],['01100110'],['10100101'],['01000010']],
+];
+
+// Boss sprites 16x16
+const BOSS_SPR = {
+  golem: [
+    '0000011111100000','0001111111111000','0011111111111100','0111110000111110',
+    '0111100110011110','1111111111111111','1111111111111111','0111111111111110',
+    '0011111111111100','0111111111111110','1111111111111111','1111100000011111',
+    '1111000000001111','1111100000011111','0111110000111110','0011111111111100',
+  ],
+  wraith: [
+    '0000011111100000','0001111111111000','0011100110011100','0111000000001110',
+    '0110000000000110','1111100110011111','1111111111111111','0111111111111110',
+    '0011111111111100','0001111111111000','0001101111011000','0011000110001100',
+    '0110001111000110','0100011111100010','1000111001110001','0001100000011000',
+  ],
+  hydra: [
+    '1100000000000011','1110000000000111','0111001001001110','0011101111011100',
+    '0001111111111000','0000111111110000','0001111111111000','0011111111111100',
+    '0111111111111110','1111111111111111','1111110000111111','0111100000011110',
+    '0011100110011100','0001111111111000','0000111111110000','0000011001100000',
+  ],
+  divider: [
+    '0000011001100000','0000111111110000','0001111111111000','0011110000111100',
+    '0111100110011110','0111111111111110','1111111111111111','1111100110011111',
+    '1111100110011111','1111111111111111','0111111111111110','0111100110011110',
+    '0011110000111100','0001111111111000','0000111111110000','0000011001100000',
+  ],
+};
+
+const TOWER_SPR = [
+  '0001111000','0001111000','0011111100','0011111100','0011001100',
+  '0111111110','0111111110','0111001110','1111111111','1111111111','1111001111','1111111111',
+];
+const CRATE_SPR = ['11111111','10000001','10011001','10011001','10011001','10011001','10000001','11111111'];
+const POWER_CRATE_SPR = ['11111111','12222221','12211221','12211221','12211221','12211221','12222221','11111111'];
+// 32x32 detailed pixel art skull with shading
+// 0=transparent, 1=bone white, 2=shadow dark, 3=mid shadow, 4=eye socket, 5=teeth highlight
+const SKULL = [
+  '00000000000011111111000000000000',
+  '00000000001111111111110000000000',
+  '00000000111111111111111100000000',
+  '00000001111111111111111110000000',
+  '00000011111111111111111111000000',
+  '00000111111111111111111111100000',
+  '00001111111111111111111111110000',
+  '00011111111111111111111111111000',
+  '00011111111111111111111111111000',
+  '00111111111111111111111111111100',
+  '00111111111111111111111111111100',
+  '00111113311111111111113311111100',
+  '00111134411111111111144311111100',
+  '01111144411111111111144411111110',
+  '01111144411113311111144411111110',
+  '01111134411113311111144311111110',
+  '01111113311111111111133111111110',
+  '00111111111111111111111111111100',
+  '00111111111111221111111111111100',
+  '00011111111112222111111111111000',
+  '00011111111111221111111111111000',
+  '00001111111111111111111111110000',
+  '00000111111155555555111111100000',
+  '00000011111515151515111111000000',
+  '00000001115555555555511100000000',
+  '00000000115151515151510000000000',
+  '00000000011555555555100000000000',
+  '00000000001151515151000000000000',
+  '00000000000115555510000000000000',
+  '00000000000011111100000000000000',
+  '00000000000001111000000000000000',
+  '00000000000000110000000000000000',
+];
+const SKULL_COLORS = {
+  '1': '#d8d0c0', '2': '#181018', '3': '#58505a', '4': '#100810', '5': '#f0e8d8'
+};
+const BLDG = [
+  ['01111110','01111110','01100110','01111110','01100110','01111110','01111110','01100110','01111110','11111111'],
+  ['11111111','11100111','11111111','11100111','11111111','11111111'],
+  ['01111110','01111110','01100110','01111110','01100110','01111110','01111110','11111111'],
+  ['00111100','01111110','01100110','01111110','01100110','01111110','11111111'],
+  ['00010000','00111000','01111110','01100110','01111110','01100110','01111110','01111110','11111111'],
+];
+
+function drawSpr(data, x, y, sc, cols) {
+  const cc = cols || { '1': C.bone };
+  for (let r = 0; r < data.length; r++) {
+    const row = typeof data[r] === 'string' ? data[r] : data[r][0];
+    for (let c = 0; c < row.length; c++) {
+      if (row[c] === '0') continue;
+      g.fillStyle = cc[row[c]] || C.bone;
+      g.fillRect(Math.floor(x + c * sc), Math.floor(y + r * sc), sc, sc);
+    }
+  }
+}
+
+// ══════════════════════
+//  CITY
+// ══════════════════════
+let city;
+function buildCity() {
+  city = [];
+  const n = Math.floor(W / 36);
+  for (let i = 0; i < n; i++) {
+    const spr = BLDG[(i * 7 + 3) % BLDG.length];
+    const x = i * 36 + 4 + ((i * 13) % 6);
+    const segs = spr.map((row, ri) => ({ row, y: GND - spr.length * 3 + ri * 3, ok: true }));
+    city.push({ x, w: 24, segs });
+  }
+}
+function drawCity() {
+  for (const b of city) for (const s of b.segs) {
+    if (!s.ok) continue;
+    for (let c = 0; c < s.row.length; c++) {
+      if (s.row[c] === '0') continue;
+      const isWin = s.row[c] === '1' && ((c + Math.floor(s.y / 3)) % 3 === 0);
+      g.fillStyle = isWin ? C.mid : C.bone;
+      g.fillRect(b.x + c * 3, s.y, 3, 3);
+    }
+  }
+}
+function damageCity(ex) {
+  let best = null, bd = 999;
+  for (const b of city) { const d = Math.abs(ex - (b.x + b.w / 2)); if (d < bd) { bd = d; best = b; } }
+  if (!best || bd > 30) return;
+  let n = 0;
+  for (let i = best.segs.length - 1; i >= 0 && n < 4; i--) {
+    if (best.segs[i].ok) {
+      best.segs[i].ok = false; n++;
+      for (let p = 0; p < 6; p++)
+        particles.push({ x: best.x + Math.random() * best.w, y: best.segs[i].y,
+          vx: (Math.random() - 0.5) * 3, vy: -Math.random() * 3 - 1, life: 40, ml: 40, sz: 2, col: C.bone });
+    }
+  }
+  for (let p = 0; p < 4; p++)
+    particles.push({ x: ex + (Math.random() - 0.5) * 16, y: GND - Math.random() * 12,
+      vx: (Math.random() - 0.5) * 2, vy: -Math.random() * 2, life: 25, ml: 25, sz: 2, col: C.red });
+}
+
+// ══════════════════════
+//  TOWER & WEAPONS
+// ══════════════════════
+const tower = { x: W / 2, y: GND - 6, angle: -PI / 2, lastShot: 0 };
+let weapon = 0;
+const WNAME = ['SINGLE', 'DOUBLE', 'TRIPLE', 'FAN', 'BURST', 'BEAM', 'PLASMA'];
+let beamOn = false, beamT = 0, beamCD = 0;
+
+// ── Power-ups ──
+const POWERUP_TYPES = ['SHIELD', 'SLOW-MO', 'DOUBLE DMG', 'FIRE RATE', 'NUKE', 'TESLA', 'HOMING'];
+const POWERUP_COLORS = [C.cyan, C.blue, C.red2, C.gold, C.red, C.purple, C.green];
+let activePowerup = null, powerupTimer = 0, powerupType = '';
+let shieldHP = 0;
+let teslaActive = false;
+let homingActive = false;
+let homingMissiles = [];
+
+// ── Collections ──
+let bullets, enemies, crates, particles, floats, trails;
+
+// ── Difficulty (driven by waveStats) ──
+function diff() {
+  const ws = waveStats();
+  const slowMod = powerupType === 'SLOW-MO' ? 0.4 : 1;
+  const fireMod = powerupType === 'FIRE RATE' ? 0.33 : 1;
+  return {
+    speed: ws.speed * slowMod,
+    hp: ws.hp,
+    fire: Math.max(60, 220 - time * 0.4) * fireMod,
+    // Weapon crate: guaranteed early, slower later
+    crate: waveNum <= 2 ? 6000 : Math.max(5000, 14000 - waveNum * 400),
+    // Power-up crate: starts wave 3
+    powerCrate: waveNum < 3 ? 99999 : Math.max(8000, 22000 - waveNum * 500),
+  };
+}
+
+function tierForWave() {
+  const ws = waveStats();
+  return Math.floor(Math.random() * (ws.maxTier + 1));
+}
+
+// ══════════════════════
+//  GAME START
+// ══════════════════════
+let spawnT = 0, crateT = 0, powerCrateT = 0, lastT = 0, beamDmgT = 0;
+
+function startGame() {
+  state = 'play'; time = 0; score = 0; weapon = 0; cityHP = MAX_HP;
+  tower.angle = -PI / 2;
+  beamOn = false; beamT = 0; beamCD = 0;
+  bullets = []; enemies = []; crates = []; particles = []; floats = []; trails = [];
+  homingMissiles = [];
+  trauma = 0; freeze = 0;
+  waveNum = 0; waveType = ''; waveTimer = 0; waveSpawnCount = 0;
+  waveActive = false; wavePause = true; wavePauseTimer = 3000;
+  waveAnnounce = 0; bossAlive = null;
+  comboCount = 0; comboTimer = 0; comboMult = 1; bestCombo = 0;
+  activePowerup = null; powerupTimer = 0; powerupType = '';
+  shieldHP = 0; teslaActive = false; homingActive = false;
+  weather = 'clear'; weatherTimer = 20000; lightningFlash = 0;
+  spawnT = 0; crateT = 0; powerCrateT = 0; beamDmgT = 0;
+  buildCity(); initWeather();
+  startMusic();
+}
+
+// ══════════════════════
+//  SHOOTING
+// ══════════════════════
+function shoot(now) {
+  if (beamOn) return;
+  const d = diff();
+  if (now - tower.lastShot < d.fire) return;
+  tower.lastShot = now;
+  sfx('shoot');
+  const a = tower.angle, sp = 5;
+  const bx = tower.x + Math.cos(a) * 22, by = tower.y - 16 + Math.sin(a) * 22;
+  const dmg = powerupType === 'DOUBLE DMG' ? 2 : 1;
+  const col = powerupType === 'DOUBLE DMG' ? C.red2 : null;
+  const mk = (ang, tp) => ({
+    x: bx, y: by,
+    vx: Math.cos(ang) * sp * (tp === 'boom' ? 0.65 : 1),
+    vy: Math.sin(ang) * sp * (tp === 'boom' ? 0.65 : 1),
+    type: tp || 'n', life: tp === 'boom' ? 50 : 200,
+    dmg, col, pierce: weapon >= 6 && tp !== 'boom' && tp !== 'sub',
+  });
+
+  if (weapon === 0)      bullets.push(mk(a));
+  else if (weapon === 1) { bullets.push(mk(a - 0.06)); bullets.push(mk(a + 0.06)); }
+  else if (weapon === 2) { bullets.push(mk(a)); bullets.push(mk(a - 0.08)); bullets.push(mk(a + 0.08)); }
+  else if (weapon === 3) { for (let i = -2; i <= 2; i++) bullets.push(mk(a + i * 0.055)); }
+  else if (weapon === 4) { bullets.push(mk(a, 'boom')); bullets.push(mk(a - 0.09)); bullets.push(mk(a + 0.09)); }
+  else { bullets.push(mk(a)); bullets.push(mk(a - 0.08)); bullets.push(mk(a + 0.08)); }
+  trauma += 0.02;
+  for (let i = 0; i < 2; i++)
+    particles.push({ x: bx, y: by, vx: Math.cos(a) * 2 + (Math.random() - 0.5), vy: Math.sin(a) * 2 + (Math.random() - 0.5), life: 6, ml: 6, sz: 2, col: C.white });
+}
+
+function explodeBullet(b) {
+  sfx('explode');
+  for (let i = 0; i < 10; i++) { const a = (PI * 2 / 10) * i;
+    bullets.push({ x: b.x, y: b.y, vx: Math.cos(a) * 3, vy: Math.sin(a) * 3, type: 'sub', life: 18, dmg: b.dmg || 1, pierce: false }); }
+  for (let i = 0; i < 12; i++)
+    particles.push({ x: b.x, y: b.y, vx: (Math.random() - 0.5) * 5, vy: (Math.random() - 0.5) * 5, life: 18, ml: 18, sz: 2 + Math.random() * 2, col: Math.random() > 0.5 ? C.white : C.red });
+  // Expanding ring
+  particles.push({ x: b.x, y: b.y, vx: 0, vy: 0, life: 12, ml: 12, sz: 0, col: C.red2, ring: true, ringR: 5 });
+  trauma += 0.12;
+}
+
+// ── Spawn enemies ──
+function spawnWaveEnemy() {
+  const d = diff();
+  let tier, x, y, vx, vy, hp, spd;
+
+  if (waveType === 'BOSS') {
+    const bossNumber = Math.floor(waveNum / 5); // 1st, 2nd, 3rd boss...
+    const bossTypes = ['golem', 'wraith', 'divider', 'hydra'];
+    const bossIdx = (bossNumber - 1) % bossTypes.length;
+    const bType = bossTypes[bossIdx];
+    // Progressive HP: each boss much harder than the last
+    hp = 20 + bossNumber * 25 + Math.floor(bossNumber * bossNumber * 5);
+    const bossSpd = 0.1 + bossNumber * 0.025;
+    const bossSc = Math.min(4.5, 2.5 + bossNumber * 0.3);
+    const bossSize = Math.floor(16 * (bossSc / 3));
+    const boss = {
+      x: W / 2, y: -30, vx: 0, vy: bossSpd,
+      hp, mhp: hp, size: bossSize, tier: -1, seed: Math.random() * 100, flash: 0,
+      boss: true, bossType: bType, bossNumber, bossSc,
+      phase: 0, phaseTimer: 0, minionTimer: 0,
+      teleportTimer: 0, visible: true,
+      splitPhase: 0, // divider: 0=whole, 1=split into 2, 2=each splits into 3
+    };
+    if (bType === 'hydra') {
+      boss.heads = [{ hp: Math.ceil(hp / 3), mhp: Math.ceil(hp / 3) }, { hp: Math.ceil(hp / 3), mhp: Math.ceil(hp / 3) }, { hp: Math.ceil(hp / 3), mhp: Math.ceil(hp / 3) }];
+      boss.hp = boss.heads.reduce((s, h) => s + h.hp, 0);
+      boss.mhp = boss.hp;
+    }
+    enemies.push(boss);
+    bossAlive = boss;
+    return;
+  }
+
+  const ws = waveStats();
+  tier = tierForWave();
+  spd = ws.speed * (0.85 + Math.random() * 0.3);
+  hp = ws.hp + Math.floor(tier * 0.5);
+
+  // Spawn directions: mostly top early, more flankers later
+  const r = Math.random();
+  if (r < (0.7 - ws.flankChance)) {
+    x = 20 + Math.random() * (W - 40); y = -15;
+    vx = (Math.random() - 0.5) * spd * 0.2; vy = spd * (0.4 + Math.random() * 0.4);
+  } else if (r < 0.85) {
+    x = -15; y = 20 + Math.random() * H * 0.35;
+    vx = spd * 0.7; vy = spd * 0.15;
+  } else {
+    x = W + 15; y = 20 + Math.random() * H * 0.35;
+    vx = -spd * 0.7; vy = spd * 0.15;
+  }
+
+  const enScale = ws.enScale;
+  const hitSize = Math.floor(4 * enScale);
+  const en = { x, y, vx, vy, hp, mhp: hp, size: hitSize, tier, seed: Math.random() * 100, flash: 0, boss: false, enScale };
+  if (tier === 5) en.splitter = true;
+  if (tier === 6) { en.shielded = true; en.shieldHP = 1; }
+  if (tier === 7) { en.zigzag = true; en.zigT = Math.random() * PI * 2; }
+  enemies.push(en);
+}
+
+function spawnCrate() {
+  if (weapon >= 6) return;
+  crates.push({ x: 40 + Math.random() * (W - 80), y: -15, vy: 0.4 + Math.random() * 0.3, wt: weapon + 1, power: false });
+}
+
+function spawnPowerCrate() {
+  const type = POWERUP_TYPES[Math.floor(Math.random() * POWERUP_TYPES.length)];
+  const idx = POWERUP_TYPES.indexOf(type);
+  crates.push({ x: 40 + Math.random() * (W - 80), y: -15, vy: 0.35 + Math.random() * 0.2, power: true, powerType: type, powerIdx: idx });
+}
+
+function killEnemy(i) {
+  const e = enemies[i];
+
+  // Splitter: spawn 2 mini enemies
+  if (e.splitter && !e.mini) {
+    for (let s = 0; s < 2; s++) {
+      enemies.push({
+        x: e.x + (s === 0 ? -8 : 8), y: e.y,
+        vx: (s === 0 ? -1 : 1) * 0.5, vy: 0.3,
+        hp: Math.max(1, Math.floor(e.mhp * 0.3)), mhp: Math.max(1, Math.floor(e.mhp * 0.3)),
+        size: Math.max(4, Math.floor((e.size || 10) * 0.5)), tier: Math.max(0, e.tier - 2), seed: Math.random() * 100, flash: 0,
+        boss: false, splitter: false, mini: true, enScale: Math.max(1, (e.enScale || 2) * 0.5),
+      });
+    }
+  }
+
+  // Divider boss: splits on death! Phase 0→splits into 2, phase 1→each splits into 3, phase 2→dies for real
+  if (e.boss && e.bossType === 'divider' && e.splitPhase < 2) {
+    const nextPhase = e.splitPhase + 1;
+    const childCount = nextPhase === 1 ? 2 : 3;
+    const childHP = Math.max(5, Math.floor(e.mhp * (nextPhase === 1 ? 0.5 : 0.25)));
+    const childSc = Math.max(1.5, (e.bossSc || 3) * (nextPhase === 1 ? 0.7 : 0.5));
+    const childSize = Math.floor(16 * (childSc / 3));
+    sfx('explode');
+    floats.push({ t: nextPhase === 1 ? 'SPLIT!' : 'SPLIT x3!', x: e.x, y: e.y - 20, life: 50, col: C.gold });
+    for (let p = 0; p < 15; p++) particles.push({ x: e.x, y: e.y, vx: (Math.random() - 0.5) * 5, vy: (Math.random() - 0.5) * 5, life: 15, ml: 15, sz: 2, col: C.red2 });
+    particles.push({ x: e.x, y: e.y, vx: 0, vy: 0, life: 12, ml: 12, sz: 0, col: C.gold, ring: true, ringR: 10 });
+    trauma += 0.3;
+    for (let c = 0; c < childCount; c++) {
+      const angle = (PI * 2 / childCount) * c - PI / 2;
+      const spread = 25 + childCount * 5;
+      enemies.push({
+        x: e.x + Math.cos(angle) * spread, y: e.y + Math.sin(angle) * spread,
+        vx: Math.cos(angle) * 0.5, vy: Math.max(0.05, (e.vy || 0.1)),
+        hp: childHP, mhp: childHP, size: childSize, tier: -1, seed: Math.random() * 100, flash: 0,
+        boss: true, bossType: 'divider', bossNumber: e.bossNumber,
+        bossSc: childSc, splitPhase: nextPhase,
+        phase: 0, phaseTimer: 0, minionTimer: 0, teleportTimer: 0, visible: true,
+      });
+    }
+    enemies.splice(i, 1);
+    score += 100 * nextPhase;
+    return;
+  }
+
+  const isBoss = e.boss;
+  const pts = isBoss ? 500 * waveNum : (e.tier + 1) * 20;
+
+  // Combo
+  comboCount++; comboTimer = 120;
+  comboMult = Math.min(10, 1 + Math.floor(comboCount / 3));
+  if (comboCount > bestCombo) bestCombo = comboCount;
+  if (comboCount >= 3) sfx('combo');
+
+  const totalPts = pts * comboMult;
+  score += totalPts;
+  const ptsTxt = comboMult > 1 ? `+${pts}x${comboMult}` : `+${pts}`;
+  floats.push({ t: ptsTxt, x: e.x, y: e.y - 12, life: 40, col: comboMult > 1 ? C.gold : C.white });
+
+  // Death particles - disintegration effect
+  const pCount = isBoss ? 30 : 10;
+  for (let p = 0; p < pCount; p++) {
+    const ang = (PI * 2 / pCount) * p;
+    const spd = 1 + Math.random() * (isBoss ? 6 : 4);
+    particles.push({ x: e.x, y: e.y, vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd,
+      life: 20 + Math.floor(Math.random() * 10), ml: 30, sz: 2, col: Math.random() > 0.4 ? C.bone : C.red });
+  }
+  // Expanding ring on kill
+  particles.push({ x: e.x, y: e.y, vx: 0, vy: 0, life: 15, ml: 15, sz: 0, col: isBoss ? C.gold : C.red, ring: true, ringR: 8 });
+
+  if (isBoss) {
+    sfx('bossDie');
+    const remainingBosses = enemies.filter((en, idx2) => en.boss && idx2 !== i).length;
+    if (remainingBosses === 0) bossAlive = null;
+    trauma += 0.6; freeze = 8;
+    floats.push({ t: remainingBosses > 0 ? 'PIECE DESTROYED!' : 'BOSS DEFEATED!', x: e.x, y: e.y - 20, life: 90, col: C.gold });
+    // Wave clear bonus
+    const waveBonus = 100 * waveNum;
+    score += waveBonus;
+    floats.push({ t: `WAVE BONUS +${waveBonus}`, x: W / 2, y: H / 2, life: 70, col: C.cyan });
+  } else {
+    sfx('kill');
+    freeze = 2; trauma += 0.05;
+  }
+
+  enemies.splice(i, 1);
+}
+
+function beamHit(tx, ty, sz) {
+  if (!beamOn) return false;
+  const ox = tower.x, oy = tower.y - 16, dx = Math.cos(tower.angle), dy = Math.sin(tower.angle);
+  const ex = tx - ox, ey = ty - oy, t = ex * dx + ey * dy;
+  if (t < 0) return false;
+  return Math.sqrt((tx - (ox + dx * t)) ** 2 + (ty - (oy + dy * t)) ** 2) < sz;
+}
+
+// ── Tesla field ──
+function updateTesla(dt) {
+  if (!teslaActive) return;
+  const range = 80;
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    const dx = tower.x - e.x, dy = (tower.y - 16) - e.y;
+    if (dx * dx + dy * dy < range * range) {
+      e.hp--; e.flash = 2;
+      if (Math.random() > 0.7) particles.push({ x: e.x, y: e.y, vx: (Math.random() - 0.5) * 3, vy: (Math.random() - 0.5) * 3, life: 6, ml: 6, sz: 1, col: C.purple });
+      if (e.hp <= 0 && !e.boss) killEnemy(i);
+      else if (e.boss && e.hp <= 0) { if (e.bossType === 'hydra') checkHydra(e, i); else killEnemy(i); }
+    }
+  }
+}
+
+// ── Homing missiles ──
+function updateHoming(dt) {
+  if (!homingActive && homingMissiles.length === 0) return;
+  if (homingActive && enemies.length > 0 && Math.random() < 0.15) {
+    const target = enemies[Math.floor(Math.random() * enemies.length)];
+    const ang = -PI / 2 + (Math.random() - 0.5) * 0.5;
+    homingMissiles.push({
+      x: tower.x, y: tower.y - 20,
+      vx: Math.cos(ang) * 3, vy: Math.sin(ang) * 3,
+      target, life: 200,
+    });
+  }
+  for (let i = homingMissiles.length - 1; i >= 0; i--) {
+    const m = homingMissiles[i];
+    m.life--;
+    if (m.life <= 0 || !m.target || m.target.hp <= 0) { homingMissiles.splice(i, 1); continue; }
+    const dx = m.target.x - m.x, dy = m.target.y - m.y;
+    const d = Math.sqrt(dx * dx + dy * dy);
+    if (d > 0) { m.vx += (dx / d) * 0.3; m.vy += (dy / d) * 0.3; }
+    const spd = Math.sqrt(m.vx * m.vx + m.vy * m.vy);
+    if (spd > 4) { m.vx *= 4 / spd; m.vy *= 4 / spd; }
+    m.x += m.vx; m.y += m.vy;
+    trails.push({ x: m.x, y: m.y, life: 8, ml: 8, col: C.green });
+    if (d < m.target.size + 4) {
+      m.target.hp -= 2; m.target.flash = 3;
+      if (m.target.hp <= 0 && !m.target.boss) {
+        const idx = enemies.indexOf(m.target);
+        if (idx >= 0) killEnemy(idx);
+      }
+      for (let p = 0; p < 4; p++) particles.push({ x: m.x, y: m.y, vx: (Math.random() - 0.5) * 3, vy: (Math.random() - 0.5) * 3, life: 8, ml: 8, sz: 2, col: C.green });
+      homingMissiles.splice(i, 1);
+    }
+  }
+}
+
+function checkHydra(e, idx) {
+  if (!e.heads) return;
+  // Distribute damage across heads
+  for (const h of e.heads) {
+    if (h.hp > 0) { h.hp--; break; }
+  }
+  e.hp = e.heads.reduce((s, h) => s + h.hp, 0);
+  if (e.hp <= 0) killEnemy(idx);
+}
+
+function activatePowerup(type) {
+  sfx('powerup');
+  if (type === 'NUKE') {
+    sfx('nuke');
+    // Kill all non-boss enemies
+    for (let i = enemies.length - 1; i >= 0; i--) {
+      if (!enemies[i].boss) killEnemy(i);
+      else { enemies[i].hp -= 15; enemies[i].flash = 6; }
+    }
+    trauma += 0.8; lightningFlash = 12;
+    particles.push({ x: W / 2, y: H / 2, vx: 0, vy: 0, life: 20, ml: 20, sz: 0, col: C.white, ring: true, ringR: 20 });
+    return;
+  }
+  activePowerup = type; powerupType = type;
+  powerupTimer = type === 'SHIELD' ? 10000 : 8000;
+  if (type === 'SHIELD') shieldHP = 3;
+  if (type === 'TESLA') teslaActive = true;
+  if (type === 'HOMING') homingActive = true;
+}
+
+function deactivatePowerup() {
+  if (powerupType === 'TESLA') teslaActive = false;
+  if (powerupType === 'HOMING') homingActive = false;
+  activePowerup = null; powerupType = ''; powerupTimer = 0; shieldHP = 0;
+}
+
+// ══════════════════════
+//  UPDATE
+// ══════════════════════
+function update(now) {
+  const dt = now - lastT; lastT = now;
+  if (dt > 100 || state !== 'play') {
+    if (state === 'gameover') gameOverTimer++;
+    return;
+  }
+  if (freeze > 0) { freeze--; return; }
+  time += dt / 1000;
+  score = Math.max(score, Math.floor(time * 10));
+  trauma = Math.max(0, trauma - dt * 0.001);
+  const s = trauma * trauma;
+  shX = (Math.random() * 2 - 1) * s * 12; shY = (Math.random() * 2 - 1) * s * 12;
+
+  // Combo decay
+  if (comboTimer > 0) { comboTimer--; if (comboTimer <= 0) { comboCount = 0; comboMult = 1; } }
+
+  // Power-up timer
+  if (powerupTimer > 0) { powerupTimer -= dt; if (powerupTimer <= 0) deactivatePowerup(); }
+
+  // Aim
+  if (keys['ArrowLeft'] || keys['KeyA']) tower.angle -= 0.04;
+  if (keys['ArrowRight'] || keys['KeyD']) tower.angle += 0.04;
+  tower.angle = Math.max(-PI + 0.1, Math.min(-0.1, tower.angle));
+
+  // Weather
+  updateWeather(dt);
+
+  // ── Wave logic ──
+  if (wavePause) {
+    wavePauseTimer -= dt;
+    if (wavePauseTimer <= 0) { wavePause = false; nextWave(); }
+  } else if (waveActive) {
+    if (waveAnnounce > 0) { waveAnnounce--; }
+    else {
+      const maxSpawns = getWaveSpawnCount();
+      waveTimer += dt;
+      if (waveSpawnCount < maxSpawns && waveTimer >= getWaveSpawnDelay()) {
+        waveTimer = 0; waveSpawnCount++;
+        spawnWaveEnemy();
+      }
+      if (waveSpawnCount >= maxSpawns) {
+        // Check if all wave enemies dead (or just boss)
+        const waveEnemiesLeft = waveType === 'BOSS' ? enemies.some(en => en.boss) : enemies.length > 0;
+        if (!waveEnemiesLeft) {
+          waveActive = false; wavePause = true;
+          wavePauseTimer = waveStats().pauseTime;
+          if (waveType !== 'BOSS') {
+            const bonus = 100 * waveNum;
+            score += bonus;
+            floats.push({ t: `WAVE ${waveNum} CLEAR +${bonus}`, x: W / 2, y: 60, life: 70, col: C.cyan });
+          }
+        }
+      }
+    }
+  }
+
+  // Beam
+  if (beamOn) { beamT -= dt; if (beamT <= 0) { beamOn = false; beamCD = 7000; }
+    beamDmgT += dt; if (beamDmgT > 50) { beamDmgT = 0;
+      for (let i = enemies.length - 1; i >= 0; i--) if (beamHit(enemies[i].x, enemies[i].y, enemies[i].size)) {
+        const dmg = powerupType === 'DOUBLE DMG' ? 2 : 1;
+        enemies[i].hp -= dmg; enemies[i].flash = 3;
+        if (enemies[i].boss && enemies[i].bossType === 'hydra') checkHydra(enemies[i], i);
+        else if (enemies[i].hp <= 0) killEnemy(i);
+      } } }
+  if (beamCD > 0) beamCD -= dt;
+  if (weapon >= 5 && !beamOn && beamCD <= 0 && keys['Space']) { beamOn = true; beamT = 3500; beamDmgT = 0; keys['Space'] = false; }
+
+  if (!beamOn) shoot(now);
+
+  // Tesla
+  if (teslaActive) updateTesla(dt);
+
+  // Homing
+  updateHoming(dt);
+
+  // ── Bullets ──
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i]; b.x += b.vx; b.y += b.vy; b.life--;
+    if (b.type === 'boom' && b.life <= 0) { explodeBullet(b); bullets.splice(i, 1); continue; }
+    if (b.life <= 0 || b.x < -10 || b.x > W + 10 || b.y < -10 || b.y > H + 10) { bullets.splice(i, 1); continue; }
+    // Trail
+    if (Math.random() > 0.5) trails.push({ x: b.x, y: b.y, life: 5, ml: 5, col: b.col || C.white });
+  }
+
+  // ── Crates ──
+  const d = diff();
+  crateT += dt;
+  if (crateT > d.crate && weapon < 6) { crateT = 0; spawnCrate(); }
+  powerCrateT += dt;
+  if (powerCrateT > d.powerCrate && waveNum >= 2) { powerCrateT = 0; spawnPowerCrate(); }
+
+  for (let i = crates.length - 1; i >= 0; i--) {
+    const c = crates[i]; c.y += c.vy;
+    if (c.y > H + 20) { crates.splice(i, 1); continue; }
+    let hit = false;
+    for (let j = bullets.length - 1; j >= 0; j--)
+      if (Math.abs(bullets[j].x - c.x) < 12 && Math.abs(bullets[j].y - c.y) < 12) { bullets.splice(j, 1); hit = true; break; }
+    if (!hit && beamOn && beamHit(c.x, c.y, 12)) hit = true;
+    if (hit) {
+      if (c.power) {
+        activatePowerup(c.powerType);
+        floats.push({ t: c.powerType + '!', x: c.x, y: c.y - 16, life: 55, col: POWERUP_COLORS[c.powerIdx] });
+        for (let p = 0; p < 14; p++) particles.push({ x: c.x, y: c.y, vx: (Math.random() - 0.5) * 6, vy: (Math.random() - 0.5) * 6, life: 22, ml: 22, sz: 2, col: POWERUP_COLORS[c.powerIdx] });
+      } else if (c.wt > weapon) {
+        weapon = c.wt; sfx('upgrade');
+        floats.push({ t: 'UPGRADE: ' + WNAME[weapon], x: c.x, y: c.y - 16, life: 55, col: C.white }); trauma += 0.12;
+        for (let p = 0; p < 14; p++) particles.push({ x: c.x, y: c.y, vx: (Math.random() - 0.5) * 6, vy: (Math.random() - 0.5) * 6, life: 22, ml: 22, sz: 2, col: C.white });
+      } else { score += 50; floats.push({ t: '+50', x: c.x, y: c.y - 12, life: 30, col: C.white }); }
+      crates.splice(i, 1);
+    }
+  }
+
+  // ── Enemies ──
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    if (e.flash > 0) e.flash--;
+
+    // Boss behaviors
+    if (e.boss) {
+      updateBoss(e, i, dt);
+      continue;
+    }
+
+    // Zigzag movement
+    if (e.zigzag) {
+      e.zigT += 0.08;
+      e.vx += Math.sin(e.zigT) * 0.15;
+    }
+
+    e.x += e.vx; e.y += e.vy;
+    const dx = tower.x - e.x, dy = tower.y - e.y, dd = Math.sqrt(dx * dx + dy * dy);
+    if (dd > 0) { e.vx += (dx / dd) * 0.001; e.vy += (dy / dd) * 0.004; }
+
+    if (e.y > GND - 10) {
+      enemies.splice(i, 1); damageCity(e.x); sfx('cityHit');
+      if (powerupType === 'SHIELD' && shieldHP > 0) { shieldHP--; floats.push({ t: 'SHIELD!', x: e.x, y: GND - 20, life: 30, col: C.cyan }); }
+      else { cityHP--; }
+      trauma += 0.5; freeze = 5;
+      if (cityHP <= 0) { cityHP = 0; state = 'gameover'; gameOverTimer = 0; sfx('gameOver'); stopMusic(); }
+      continue;
+    }
+    if (e.x < -30 || e.x > W + 30) { enemies.splice(i, 1); continue; }
+
+    // Bullet collision
+    for (let j = bullets.length - 1; j >= 0; j--) {
+      if (Math.abs(bullets[j].x - e.x) < e.size && Math.abs(bullets[j].y - e.y) < e.size) {
+        if (bullets[j].type === 'boom') explodeBullet(bullets[j]);
+        const dmg = bullets[j].dmg || 1;
+        if (!bullets[j].pierce) bullets.splice(j, 1);
+        else { j--; } // pierce: don't remove bullet
+
+        // Shielded enemy
+        if (e.shielded && e.shieldHP > 0) {
+          e.shieldHP -= dmg; e.flash = 3;
+          if (e.shieldHP <= 0) { e.shielded = false; floats.push({ t: 'SHIELD DOWN', x: e.x, y: e.y - 16, life: 25, col: C.cyan }); }
+        } else {
+          e.hp -= dmg; e.flash = 3; trauma += 0.03;
+          sfx('hit');
+          particles.push({ x: e.x, y: e.y, vx: (Math.random() - 0.5) * 3, vy: -Math.random() * 3, life: 8, ml: 8, sz: 2, col: C.red });
+          if (e.hp <= 0) { killEnemy(i); break; }
+        }
+        break;
+      }
+    }
+  }
+
+  // Trails decay
+  for (let i = trails.length - 1; i >= 0; i--) { trails[i].life--; if (trails[i].life <= 0) trails.splice(i, 1); }
+  // Particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    if (p.ring) { p.ringR += 3; p.life--; if (p.life <= 0) particles.splice(i, 1); continue; }
+    p.x += p.vx; p.y += p.vy; p.vy += 0.05; p.life--;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+  // Floats
+  for (let i = floats.length - 1; i >= 0; i--) { floats[i].y -= 0.8; floats[i].life--; if (floats[i].life <= 0) floats.splice(i, 1); }
+}
+
+// ── Boss AI ──
+function updateBoss(e, idx, dt) {
+  e.phaseTimer += dt;
+
+  if (e.bossType === 'golem') {
+    // Slow descent, spawns minions
+    e.y += 0.12;
+    e.x += Math.sin(Date.now() * 0.0008) * 0.3;
+    e.minionTimer += dt;
+    if (e.minionTimer > 3000 && enemies.length < 20) {
+      e.minionTimer = 0;
+      for (let m = 0; m < 2; m++) {
+        enemies.push({
+          x: e.x + (m === 0 ? -20 : 20), y: e.y + 10,
+          vx: (m === 0 ? -0.5 : 0.5), vy: 0.4,
+          hp: 2, mhp: 2, size: 6, tier: 0, seed: Math.random() * 100, flash: 0, boss: false, mini: true, enScale: 1.5,
+        });
+      }
+    }
+  } else if (e.bossType === 'wraith') {
+    e.y += 0.08;
+    e.x += Math.sin(Date.now() * 0.002) * 0.8;
+    e.teleportTimer += dt;
+    if (e.teleportTimer > 4000) {
+      e.teleportTimer = 0;
+      e.visible = !e.visible;
+      if (!e.visible) {
+        for (let p = 0; p < 8; p++) particles.push({ x: e.x, y: e.y, vx: (Math.random() - 0.5) * 4, vy: (Math.random() - 0.5) * 4, life: 15, ml: 15, sz: 2, col: C.purple });
+        setTimeout(() => {
+          e.x = 40 + Math.random() * (W - 80);
+          e.y = Math.max(20, e.y - 40 + Math.random() * 30);
+          e.visible = true;
+          for (let p = 0; p < 8; p++) particles.push({ x: e.x, y: e.y, vx: (Math.random() - 0.5) * 4, vy: (Math.random() - 0.5) * 4, life: 15, ml: 15, sz: 2, col: C.purple });
+        }, 800);
+      }
+    }
+  } else if (e.bossType === 'divider') {
+    const spd = 0.08 + (e.splitPhase || 0) * 0.04;
+    e.y += spd;
+    e.x += Math.sin(Date.now() * 0.0015 + e.seed) * (0.4 + (e.splitPhase || 0) * 0.3);
+  } else if (e.bossType === 'hydra') {
+    e.y += 0.1;
+    e.x += Math.sin(Date.now() * 0.001) * 0.5;
+  }
+
+  // Boss hits city
+  if (e.y > GND - 20) {
+    const dmg = e.splitPhase >= 2 ? 1 : e.splitPhase === 1 ? 2 : 3;
+    cityHP -= dmg; damageCity(e.x); sfx('cityHit');
+    trauma += 0.8; freeze = 8;
+    enemies.splice(idx, 1);
+    if (!enemies.some(en => en.boss)) bossAlive = null;
+    if (cityHP <= 0) { cityHP = 0; state = 'gameover'; gameOverTimer = 0; sfx('gameOver'); stopMusic(); }
+    return;
+  }
+
+  // Boss bullet collision
+  if (!e.visible) return;
+  for (let j = bullets.length - 1; j >= 0; j--) {
+    if (Math.abs(bullets[j].x - e.x) < e.size && Math.abs(bullets[j].y - e.y) < e.size) {
+      if (bullets[j].type === 'boom') explodeBullet(bullets[j]);
+      const dmg = bullets[j].dmg || 1;
+      if (!bullets[j].pierce) bullets.splice(j, 1);
+
+      if (e.bossType === 'hydra' && e.heads) {
+        for (const h of e.heads) { if (h.hp > 0) { h.hp -= dmg; break; } }
+        e.hp = e.heads.reduce((s2, h) => s2 + h.hp, 0);
+      } else {
+        e.hp -= dmg;
+      }
+      e.flash = 3; sfx('hit');
+      particles.push({ x: e.x + (Math.random() - 0.5) * 10, y: e.y + (Math.random() - 0.5) * 10,
+        vx: (Math.random() - 0.5) * 3, vy: -Math.random() * 3, life: 8, ml: 8, sz: 2, col: C.red });
+      if (e.hp <= 0) { killEnemy(idx); return; }
+      break;
+    }
+  }
+}
+
+// ══════════════════════
+//  DRAW FUNCTIONS
+// ══════════════════════
+function drawBG() {
+  g.fillStyle = C.bg; g.fillRect(0, 0, W, H);
+  for (let y = 0; y < GND; y += 10) { g.fillStyle = `rgba(20,20,28,${0.02 + y / GND * 0.06})`; g.fillRect(0, y, W, 10); }
+  for (let layer = 0; layer < 2; layer++) {
+    const freq = layer === 0 ? 0.003 : 0.007, amp = layer === 0 ? 50 : 30;
+    for (let i = 0; i < W; i += 4) {
+      const h = Math.sin(i * freq + layer * 2) * amp + Math.sin(i * freq * 3) * amp * 0.3;
+      const top = GND - 80 - h - layer * 20;
+      g.fillStyle = layer === 0 ? '#0e0e16' : '#121220';
+      g.fillRect(i, top, 4, GND - top);
+    }
+  }
+  g.fillStyle = '#444';
+  for (let i = 0; i < 60; i++) { const sx2 = (i * 137 + 29) % W, sy = (i * 97 + 13) % (GND - 120);
+    if (Math.sin(Date.now() * 0.0006 + i * 0.9) > 0.3) g.fillRect(sx2, sy, 2, 2); }
+  g.fillStyle = C.mid; g.fillRect(0, GND, W, 2);
+  g.fillStyle = C.dark; g.fillRect(0, GND + 2, W, H - GND - 2);
+}
+
+function drawTower() {
+  const { x, y, angle } = tower;
+  drawSpr(TOWER_SPR, x - 15, y - 18, 3);
+  const bx = x, by = y - 16, len = 22;
+  const ex = bx + Math.cos(angle) * len, ey = by + Math.sin(angle) * len;
+  g.strokeStyle = C.white; g.lineWidth = 3;
+  g.beginPath(); g.moveTo(bx, by); g.lineTo(ex, ey); g.stroke();
+  g.fillStyle = C.white; g.fillRect(Math.floor(ex) - 2, Math.floor(ey) - 2, 4, 4);
+  if (Date.now() - tower.lastShot < 60) { g.fillStyle = C.white; g.beginPath(); g.arc(ex + Math.cos(angle) * 6, ey + Math.sin(angle) * 6, 4, 0, PI * 2); g.fill(); }
+
+  // Tesla field visual
+  if (teslaActive) {
+    g.save();
+    g.globalAlpha = 0.1 + Math.sin(Date.now() * 0.01) * 0.05;
+    g.strokeStyle = C.purple; g.lineWidth = 1;
+    g.beginPath(); g.arc(x, y - 16, 80, 0, PI * 2); g.stroke();
+    g.globalAlpha = 0.04;
+    g.fillStyle = C.purple;
+    g.beginPath(); g.arc(x, y - 16, 80, 0, PI * 2); g.fill();
+    // Electric arcs
+    for (let a = 0; a < 6; a++) {
+      const ang = (Date.now() * 0.003 + a * PI / 3) % (PI * 2);
+      const r = 60 + Math.random() * 20;
+      g.globalAlpha = 0.3;
+      g.strokeStyle = C.purple; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(x, y - 16);
+      g.lineTo(x + Math.cos(ang) * r * 0.5 + (Math.random() - 0.5) * 10, y - 16 + Math.sin(ang) * r * 0.5 + (Math.random() - 0.5) * 10);
+      g.lineTo(x + Math.cos(ang) * r, y - 16 + Math.sin(ang) * r);
+      g.stroke();
+    }
+    g.restore();
+  }
+
+  // Shield visual
+  if (powerupType === 'SHIELD') {
+    g.save();
+    g.globalAlpha = 0.15 + Math.sin(Date.now() * 0.005) * 0.05;
+    g.strokeStyle = C.cyan; g.lineWidth = 2;
+    g.beginPath(); g.arc(x, y - 10, 30, 0, PI * 2); g.stroke();
+    g.restore();
+  }
+
+  // Beam
+  if (beamOn) {
+    const lx = bx + Math.cos(angle) * 900, ly = by + Math.sin(angle) * 900;
+    g.save(); g.globalAlpha = 0.15; g.strokeStyle = C.red2; g.lineWidth = 14;
+    g.beginPath(); g.moveTo(bx, by); g.lineTo(lx, ly); g.stroke(); g.restore();
+    g.strokeStyle = C.white; g.lineWidth = 2 + Math.random() * 2;
+    g.beginPath(); g.moveTo(bx, by); g.lineTo(lx, ly); g.stroke();
+  }
+}
+
+function drawEnemies() {
+  for (const e of enemies) {
+    if (e.boss) { drawBoss(e); continue; }
+    const frame = Math.floor(Date.now() / 250 + e.seed) % 2 === 0;
+    const tier = Math.min(e.tier, E_SPR.length - 1);
+    const spr = frame ? E_SPR[tier] : E_SPR_B[tier];
+    const sc = e.mini ? Math.max(1, (e.enScale || 2) * 0.5) : (e.enScale || 2);
+    const sprW = Math.floor(8 * sc), sprH = Math.floor(8 * sc);
+    const px = Math.floor(e.x - sprW / 2), py = Math.floor(e.y - sprH / 2 + Math.sin(Date.now() * 0.003 + e.seed) * 2);
+    if (e.flash > 0) { g.fillStyle = C.white; g.fillRect(px, py, sprW, sprH); }
+    else {
+      if (e.shielded && e.shieldHP > 0) {
+        g.save(); g.globalAlpha = 0.3; g.strokeStyle = C.cyan; g.lineWidth = 1;
+        g.strokeRect(px - 2, py - 2, sprW + 4, sprH + 4); g.restore();
+      }
+      drawSpr(spr, px, py, sc);
+    }
+    if (e.mhp > 2) {
+      const barW = Math.max(12, sprW);
+      g.fillStyle = C.dark; g.fillRect(px, py - 5, barW, 3);
+      g.fillStyle = C.red; g.fillRect(px, py - 5, Math.ceil(barW * (e.hp / e.mhp)), 3);
+    }
+  }
+}
+
+function drawBoss(e) {
+  if (!e.visible) return;
+  const spr = BOSS_SPR[e.bossType];
+  if (!spr) return;
+  const sc = e.bossSc || 3;
+  const sprPx = Math.floor(16 * sc);
+  const half = Math.floor(sprPx / 2);
+  const px = Math.floor(e.x - half), py = Math.floor(e.y - half + Math.sin(Date.now() * 0.002) * 3);
+  if (e.flash > 0) {
+    g.fillStyle = C.white; g.fillRect(px, py, sprPx, sprPx);
+  } else {
+    const bossCol = e.bossType === 'golem' ? '#806040' : e.bossType === 'wraith' ? '#6040a0' : e.bossType === 'divider' ? '#c06020' : '#40a060';
+    drawSpr(spr, px, py, sc, { '1': bossCol });
+  }
+  // HP bar above boss
+  const barW = Math.max(40, sprPx + 10), barX2 = Math.floor(e.x - barW / 2), barY2 = py - 10;
+  g.fillStyle = C.dark; g.fillRect(barX2 - 1, barY2 - 1, barW + 2, 6);
+  g.fillStyle = C.red; g.fillRect(barX2, barY2, Math.ceil(barW * (e.hp / e.mhp)), 4);
+  g.font = `bold 10px ${F}`; g.fillStyle = C.bone; g.textAlign = 'center'; g.textBaseline = 'top';
+  let bName = e.bossType.toUpperCase();
+  if (e.bossType === 'divider') bName = (e.splitPhase || 0) === 0 ? 'DIVIDER' : (e.splitPhase === 1 ? 'DIVIDER x2' : 'DIVIDER x3');
+  g.fillText(bName, e.x, barY2 - 12);
+
+  // Combined boss HP bar at top of screen (first boss draws it for all)
+  const allBosses = enemies.filter(en => en.boss);
+  if (allBosses.length > 0 && allBosses[0] === e) {
+    const totalHP = allBosses.reduce((s, b) => s + b.hp, 0);
+    const totalMHP = allBosses.reduce((s, b) => s + b.mhp, 0);
+    const topBarW = 200, topBarX = W / 2 - topBarW / 2, topBarY = 42;
+    g.fillStyle = C.dark; g.fillRect(topBarX - 1, topBarY - 1, topBarW + 2, 8);
+    g.fillStyle = C.red; g.fillRect(topBarX, topBarY, Math.ceil(topBarW * (totalHP / totalMHP)), 6);
+    g.font = `bold 10px ${F}`; g.fillStyle = C.red2; g.textAlign = 'center';
+    g.fillText(`BOSS WAVE ${waveNum}`, W / 2, topBarY - 12);
+  }
+
+  // Hydra head indicators
+  if (e.bossType === 'hydra' && e.heads) {
+    const hBarX = Math.floor(e.x - 35);
+    for (let h = 0; h < 3; h++) {
+      const hx = hBarX + h * 25, hy = barY2 + 6;
+      g.fillStyle = e.heads[h].hp > 0 ? C.green : C.dark;
+      g.fillRect(hx, hy, 20, 2);
+      if (e.heads[h].hp > 0) { g.fillStyle = C.red; g.fillRect(hx, hy, Math.ceil(20 * (e.heads[h].hp / e.heads[h].mhp)), 2); }
+    }
+  }
+}
+
+function drawBullets() {
+  for (const b of bullets) {
+    g.fillStyle = b.col || (b.type === 'boom' ? C.red : C.white);
+    const sz = b.type === 'boom' ? 4 : 3;
+    g.fillRect(Math.floor(b.x) - 1, Math.floor(b.y) - 1, sz, sz);
+  }
+  // Homing missiles
+  for (const m of homingMissiles) {
+    g.fillStyle = C.green;
+    g.fillRect(Math.floor(m.x) - 2, Math.floor(m.y) - 2, 4, 4);
+  }
+}
+
+function drawTrails() {
+  for (const t of trails) {
+    g.globalAlpha = t.life / t.ml * 0.4;
+    g.fillStyle = t.col; g.fillRect(Math.floor(t.x), Math.floor(t.y), 2, 2);
+  }
+  g.globalAlpha = 1;
+}
+
+function drawCrates() {
+  for (const c of crates) {
+    const py = Math.floor(c.y + Math.sin(Date.now() * 0.003 + c.x) * 2);
+    if (c.power) {
+      // Golden power-up crate with glow
+      g.save(); g.globalAlpha = 0.2 + Math.sin(Date.now() * 0.005) * 0.1;
+      g.fillStyle = C.gold; g.beginPath(); g.arc(c.x, py, 18, 0, PI * 2); g.fill(); g.restore();
+      drawSpr(POWER_CRATE_SPR, Math.floor(c.x) - 12, py - 12, 3, { '1': C.gold, '2': C.gold2 });
+      g.font = `bold 9px ${F}`; g.fillStyle = C.gold; g.textAlign = 'center'; g.textBaseline = 'top';
+      g.fillText(c.powerType, c.x, py + 14);
+    } else {
+      drawSpr(CRATE_SPR, Math.floor(c.x) - 12, py - 12, 3, { '1': C.white });
+      g.fillStyle = C.red; g.fillRect(Math.floor(c.x) - 3, py - 3, 6, 6);
+      g.font = `bold 10px ${F}`; g.fillStyle = C.bone; g.textAlign = 'center'; g.textBaseline = 'top';
+      g.fillText(WNAME[c.wt], c.x, py + 14);
+    }
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    if (p.ring) {
+      g.globalAlpha = p.life / p.ml * 0.5;
+      g.strokeStyle = p.col; g.lineWidth = 2;
+      g.beginPath(); g.arc(p.x, p.y, p.ringR, 0, PI * 2); g.stroke();
+      continue;
+    }
+    g.globalAlpha = p.life / p.ml; g.fillStyle = p.col; g.fillRect(Math.floor(p.x), Math.floor(p.y), p.sz, p.sz);
+  }
+  g.globalAlpha = 1;
+}
+
+function drawFloats() {
+  for (const f of floats) {
+    g.globalAlpha = Math.min(1, f.life / 20);
+    g.fillStyle = f.col || C.white;
+    g.font = `bold 11px ${F}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(f.t, Math.floor(f.x), Math.floor(f.y));
+  }
+  g.globalAlpha = 1;
+}
+
+function drawAtmo() {
+  g.fillStyle = C.dark; g.globalAlpha = 0.25;
+  for (let x = 0; x < W; x += 6) { const h = 4 + Math.sin(x * 0.04 + Date.now() * 0.0003) * 3; g.fillRect(x, GND - h, 6, h); }
+  g.globalAlpha = 1;
+  const vg = g.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, H * 0.7);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.45)');
+  g.fillStyle = vg; g.fillRect(0, 0, W, H);
+}
+
+function drawHUD() {
+  g.font = `bold 14px ${F}`; g.textBaseline = 'top';
+  const min = Math.floor(time / 60), sec = Math.floor(time % 60);
+  g.fillStyle = C.bone; g.textAlign = 'left';
+  g.fillText(`${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}`, 8, 8);
+  g.fillText(`${score}`, 8, 26);
+  g.textAlign = 'right'; g.fillStyle = C.light;
+  g.fillText(`HI ${hi}`, W - 8, 8);
+
+  // Wave number
+  g.textAlign = 'center'; g.fillStyle = C.bone;
+  g.fillText(`WAVE ${waveNum}`, W / 2, 8);
+
+  // Weapon
+  g.font = `12px ${F}`; g.fillStyle = C.light;
+  g.fillText(WNAME[weapon], W / 2, 24);
+
+  // Beam bar
+  if (weapon >= 5) {
+    const bw = 80, bx = W / 2 - bw / 2, by = 36;
+    if (beamOn) { g.fillStyle = C.red; g.fillRect(bx, by, Math.ceil(bw * (beamT / 3500)), 4); }
+    else if (beamCD > 0) { g.fillStyle = C.dark; g.fillRect(bx, by, bw, 4); g.fillStyle = C.mid; g.fillRect(bx, by, Math.ceil(bw * (1 - beamCD / 7000)), 4); }
+    else if (Math.floor(Date.now() / 400) % 2) { g.font = `10px ${F}`; g.fillStyle = C.red2; g.fillText('[SPACE] BEAM', W / 2, 36); }
+  }
+
+  // Active power-up indicator
+  if (activePowerup) {
+    const pIdx = POWERUP_TYPES.indexOf(powerupType);
+    g.font = `bold 11px ${F}`; g.fillStyle = POWERUP_COLORS[pIdx];
+    g.textAlign = 'left';
+    const remaining = Math.ceil(powerupTimer / 1000);
+    g.fillText(`${powerupType} ${remaining}s`, 8, 44);
+    // Timer bar
+    const maxT = powerupType === 'SHIELD' ? 10000 : 8000;
+    g.fillStyle = POWERUP_COLORS[pIdx];
+    g.fillRect(8, 56, Math.ceil(80 * (powerupTimer / maxT)), 3);
+  }
+
+  // Combo
+  if (comboCount >= 3) {
+    g.font = `bold 16px ${F}`; g.textAlign = 'right';
+    g.fillStyle = comboMult >= 5 ? C.gold : C.red2;
+    g.fillText(`COMBO x${comboMult}`, W - 8, 28);
+    g.font = `10px ${F}`; g.fillStyle = C.light;
+    g.fillText(`${comboCount} KILLS`, W - 8, 46);
+  }
+
+  // City HP bar
+  const barTotalW = 160;
+  const pipX = W / 2 - barTotalW / 2;
+  g.font = `10px ${F}`; g.textAlign = 'right'; g.fillStyle = C.light;
+  g.fillText('CITY', pipX - 6, H - 14);
+  g.fillStyle = C.dark; g.fillRect(pipX, H - 16, barTotalW, 8);
+  g.fillStyle = cityHP <= 5 ? C.red : cityHP <= 10 ? C.gold : C.bone;
+  g.fillRect(pipX, H - 16, Math.ceil(barTotalW * (cityHP / MAX_HP)), 8);
+  g.font = `bold 9px ${F}`; g.textAlign = 'center'; g.fillStyle = C.dark;
+  g.fillText(`${cityHP}/${MAX_HP}`, W / 2, H - 13);
+  if (powerupType === 'SHIELD' && shieldHP > 0) {
+    g.font = `9px ${F}`; g.textAlign = 'left'; g.fillStyle = C.cyan;
+    g.fillText(`+${shieldHP}`, pipX + barTotalW + 4, H - 15);
+  }
+
+  // Angle
+  const ad = Math.round((tower.angle + PI / 2) * (180 / PI));
+  g.font = `12px ${F}`; g.textAlign = 'right'; g.fillStyle = C.light;
+  g.fillText(`${ad > 0 ? '+' : ''}${ad}°`, W - 8, H - 28);
+
+  // Weather indicator
+  if (weather !== 'clear') {
+    g.font = `9px ${F}`; g.textAlign = 'left'; g.fillStyle = C.mid;
+    g.fillText(weather.toUpperCase(), 8, H - 28);
+  }
+
+  // Mute indicator
+  if (muted) { g.font = `10px ${F}`; g.textAlign = 'right'; g.fillStyle = C.mid; g.fillText('MUTED [M]', W - 8, H - 42); }
+
+  // Wave announcement
+  if (waveAnnounce > 0) {
+    const t = waveAnnounce / 120;
+    g.save();
+    g.globalAlpha = Math.min(1, t * 3) * (waveAnnounce > 20 ? 1 : waveAnnounce / 20);
+    g.font = `bold 22px ${F}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillStyle = waveType === 'BOSS' ? C.red2 : C.gold;
+    g.fillText(waveAnnounceTxt, W / 2, H / 2 - 40);
+    if (waveType === 'BOSS' && Math.floor(Date.now() / 200) % 2) {
+      g.fillStyle = C.red; g.font = `bold 14px ${F}`;
+      g.fillText('WARNING', W / 2, H / 2 - 60);
+    }
+    g.restore();
+  }
+}
+
+function drawGameplay() {
+  drawBG(); drawWeather(); drawCity(); drawTrails(); drawBullets(); drawEnemies(); drawCrates(); drawParticles(); drawFloats(); drawTower(); drawAtmo(); drawHUD();
+}
+
+// ══════════════════════
+//  GAME OVER SCREEN
+// ══════════════════════
+function drawGameOver() {
+  const t = Math.min(1, gameOverTimer / 60);
+  const pulse = 0.85 + Math.sin(Date.now() * 0.003) * 0.1;
+
+  // Dark red background
+  g.fillStyle = `rgb(${Math.floor(100 * pulse * t)},${Math.floor(10 * pulse * t)},${Math.floor(8 * pulse * t)})`;
+  g.fillRect(0, 0, W, H);
+
+  // Film grain
+  for (let i = 0; i < 200; i++) {
+    const nx = (i * 137 + Math.floor(Date.now() / 80) * 31) % W;
+    const ny = (i * 97 + Math.floor(Date.now() / 80) * 17) % H;
+    g.fillStyle = `rgba(0,0,0,${0.06 + Math.random() * 0.1})`;
+    g.fillRect(nx, ny, 2, 2);
+  }
+
+  // ── SKULL PNG ──
+  const skSize = 180;
+  const skX = W / 2 - skSize / 2, skY = 10;
+  const ey = 0.4 + Math.sin(Date.now() * 0.004) * 0.6;
+
+  if (skullLoaded) {
+    // Red glow behind skull
+    g.save();
+    g.globalAlpha = ey * 0.3;
+    const glow = g.createRadialGradient(W / 2, skY + skSize / 2, skSize * 0.2, W / 2, skY + skSize / 2, skSize * 0.7);
+    glow.addColorStop(0, 'rgba(200,30,15,0.6)'); glow.addColorStop(1, 'rgba(200,30,15,0)');
+    g.fillStyle = glow; g.fillRect(skX - 40, skY - 20, skSize + 80, skSize + 40);
+    g.restore();
+
+    // Main skull (pixel art crisp)
+    g.imageSmoothingEnabled = false;
+    g.drawImage(skullImg, skX, skY, skSize, skSize);
+    g.imageSmoothingEnabled = false;
+
+    // Red eye glow overlay
+    g.save(); g.globalCompositeOperation = 'lighter'; g.globalAlpha = ey * 0.5;
+    const eyeL = g.createRadialGradient(W / 2 - 22, skY + skSize * 0.42, 3, W / 2 - 22, skY + skSize * 0.42, 18);
+    eyeL.addColorStop(0, 'rgba(220,30,10,0.9)'); eyeL.addColorStop(1, 'rgba(220,30,10,0)');
+    g.fillStyle = eyeL; g.fillRect(W / 2 - 45, skY + skSize * 0.25, 50, 50);
+    const eyeRg = g.createRadialGradient(W / 2 + 22, skY + skSize * 0.42, 3, W / 2 + 22, skY + skSize * 0.42, 18);
+    eyeRg.addColorStop(0, 'rgba(220,30,10,0.9)'); eyeRg.addColorStop(1, 'rgba(220,30,10,0)');
+    g.fillStyle = eyeRg; g.fillRect(W / 2 - 5, skY + skSize * 0.25, 50, 50);
+    g.restore();
+  } else {
+    // Fallback: draw sprite skull if PNG not loaded
+    const skSc2 = 4;
+    drawSpr(SKULL, W / 2 - 64, skY, skSc2, SKULL_COLORS);
+  }
+
+  // ── TEXT ──
+  const textY = skY + skSize + 8;
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+
+  // GAME OVER title
+  g.font = `bold 38px ${F}`;
+  g.fillStyle = 'rgba(0,0,0,0.5)'; g.fillText('GAME OVER', W / 2 + 3, textY + 3);
+  g.fillStyle = '#1a0508'; g.fillText('GAME OVER', W / 2, textY);
+
+  // Stats
+  g.font = `bold 14px ${F}`; g.fillStyle = '#2a0810';
+  const min = Math.floor(time / 60), sec = Math.floor(time % 60);
+  g.fillText(`SURVIVED  ${min}m ${sec}s`, W / 2, textY + 35);
+  g.fillText(`SCORE  ${score}`, W / 2, textY + 55);
+  g.font = `13px ${F}`;
+  g.fillText(`WAVE: ${waveNum}   WEAPON: ${WNAME[weapon]}   BEST COMBO: ${bestCombo}`, W / 2, textY + 75);
+
+  if (score >= hi && score > 0) {
+    g.font = `bold 16px ${F}`; g.fillStyle = '#2a0810';
+    g.fillText('NEW HIGH SCORE', W / 2, textY + 100);
+  }
+
+  // Press enter prompt
+  if (gameOverTimer > 90) {
+    const blink = Math.floor(Date.now() / 500) % 2;
+    if (blink) {
+      g.font = `bold 16px ${F}`; g.fillStyle = `rgba(${150 + Math.floor(ey * 60)},25,15,0.85)`;
+      g.fillText('PRESS ENTER TO CONTINUE', W / 2, H - 40);
+    }
+  }
+
+  // Vignette
+  const vg2 = g.createRadialGradient(W / 2, H / 2, H * 0.15, W / 2, H / 2, H * 0.6);
+  vg2.addColorStop(0, 'rgba(0,0,0,0)'); vg2.addColorStop(1, 'rgba(0,0,0,0.6)');
+  g.fillStyle = vg2; g.fillRect(0, 0, W, H);
+}
+
+// ══════════════════════
+//  NAME ENTRY + RANKING
+// ══════════════════════
+function drawNameEntry() {
+  g.fillStyle = '#0e0508'; g.fillRect(0, 0, W, H);
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.font = `bold 22px ${F}`; g.fillStyle = C.red2;
+  g.fillText('ENTER YOUR NAME', W / 2, 35);
+  g.font = `bold 14px ${F}`; g.fillStyle = C.bone;
+  const min = Math.floor(time / 60), sec = Math.floor(time % 60);
+  g.fillText(`SCORE: ${score}   WAVE: ${waveNum}   TIME: ${min}m ${sec}s`, W / 2, 62);
+  const bw = 220, bh = 36, bx = W / 2 - bw / 2, by = 80;
+  g.fillStyle = '#060208'; g.fillRect(bx, by, bw, bh);
+  g.strokeStyle = C.red; g.lineWidth = 2; g.strokeRect(bx, by, bw, bh);
+  const cursor = Math.floor(Date.now() / 400) % 2 === 0 ? '\u2588' : ' ';
+  g.font = `bold 20px ${F}`; g.fillStyle = C.white;
+  g.fillText(nameInput + cursor, W / 2, by + bh / 2);
+  g.font = `12px ${F}`; g.fillStyle = C.light;
+  g.fillText('TYPE YOUR NAME THEN PRESS ENTER', W / 2, by + bh + 16);
+
+  const lbY = by + bh + 40;
+  g.font = `bold 14px ${F}`; g.fillStyle = C.red;
+  g.fillText('\u2500\u2500\u2500 HALL OF DOOM \u2500\u2500\u2500', W / 2, lbY);
+  g.font = `bold 12px ${F}`;
+  const top = ranks.slice(0, 8);
+  if (top.length === 0) { g.fillStyle = C.mid; g.fillText('NO ENTRIES YET', W / 2, lbY + 25); }
+  else {
+    for (let i = 0; i < top.length; i++) {
+      const r = top[i], y = lbY + 22 + i * 20;
+      const rm = Math.floor(r.time / 60), rs = r.time % 60;
+      g.fillStyle = i === 0 ? C.red2 : C.bone; g.textAlign = 'left';
+      g.fillText(`${String(i + 1).padStart(2)}.`, W / 2 - 150, y);
+      g.fillText(r.name, W / 2 - 120, y);
+      g.textAlign = 'right'; g.fillStyle = i === 0 ? C.red2 : C.light;
+      g.fillText(`${r.score}`, W / 2 + 60, y);
+      g.fillStyle = C.mid;
+      g.fillText(`W${r.wave || '?'}`, W / 2 + 100, y);
+      g.fillText(`${rm}m${String(rs).padStart(2, '0')}s`, W / 2 + 145, y);
+    }
+  }
+  const vg2 = g.createRadialGradient(W / 2, H / 2, H * 0.25, W / 2, H / 2, H * 0.6);
+  vg2.addColorStop(0, 'rgba(0,0,0,0)'); vg2.addColorStop(1, 'rgba(0,0,0,0.45)');
+  g.fillStyle = vg2; g.fillRect(0, 0, W, H);
+}
+
+// ══════════════════════
+//  MENU
+// ══════════════════════
+function drawMenu() {
+  g.fillStyle = C.bg; g.fillRect(0, 0, W, H);
+  g.fillStyle = '#444';
+  for (let i = 0; i < 40; i++) { const sx2 = (i * 137 + 29) % W, sy = (i * 97 + 13) % H;
+    if (Math.sin(Date.now() * 0.001 + i) > 0.3) g.fillRect(sx2, sy, 2, 2); }
+
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.font = `bold 36px ${F}`; g.fillStyle = C.bone;
+  g.fillText('DARK TOWER', W / 2, 50);
+  g.font = `14px ${F}`; g.fillStyle = C.light;
+  g.fillText('DEFEND THE CITY', W / 2, 78);
+
+  // Alien parade
+  for (let i = 0; i < Math.min(8, E_SPR.length); i++) {
+    const frame = Math.floor(Date.now() / 300 + i) % 2 === 0;
+    const bob = Math.sin(Date.now() * 0.003 + i * 1.5) * 3;
+    const tier = Math.min(i, E_SPR.length - 1);
+    drawSpr(frame ? E_SPR[tier] : E_SPR_B[tier], W / 2 - 80 + i * 22, 95 + bob, 2);
+  }
+
+  g.font = `bold 12px ${F}`; g.fillStyle = C.light;
+  g.fillText('[A/D] AIM   [F] FULLSCREEN   [M] MUTE', W / 2, 135);
+  g.fillText('SHOOT CRATES FOR WEAPON UPGRADES & POWER-UPS', W / 2, 152);
+  g.fillText('ENEMIES SHRINK & SPEED UP EACH WAVE \u2014 BOSS EVERY 5', W / 2, 169);
+
+  g.font = `10px ${F}`; g.fillStyle = C.mid;
+  g.fillText('POWER-UPS: SHIELD \u2022 SLOW-MO \u2022 DOUBLE DMG \u2022 FIRE RATE \u2022 NUKE \u2022 TESLA \u2022 HOMING', W / 2, 188);
+
+  if (ranks.length > 0) {
+    g.font = `bold 12px ${F}`; g.fillStyle = C.red;
+    g.fillText('\u2500\u2500\u2500 HALL OF DOOM \u2500\u2500\u2500', W / 2, 212);
+    g.font = `11px ${F}`;
+    const top5 = ranks.slice(0, 5);
+    for (let i = 0; i < top5.length; i++) {
+      const r = top5[i], y = 232 + i * 18;
+      g.fillStyle = i === 0 ? C.red2 : C.bone; g.textAlign = 'left';
+      g.fillText(`${i + 1}. ${r.name}`, W / 2 - 120, y);
+      g.textAlign = 'right'; g.fillStyle = i === 0 ? C.red2 : C.light;
+      g.fillText(`${r.score}`, W / 2 + 60, y);
+      g.fillStyle = C.mid; g.fillText(`W${r.wave || '?'}`, W / 2 + 100, y);
+    }
+  } else {
+    g.font = `12px ${F}`; g.fillStyle = C.mid;
+    g.fillText(`HIGH SCORE: ${hi}`, W / 2, 220);
+  }
+
+  if (Math.floor(Date.now() / 500) % 2 === 0) {
+    g.font = `bold 16px ${F}`; g.fillStyle = C.bone;
+    g.fillText('PRESS ENTER TO START', W / 2, H - 35);
+  }
+  drawAtmo();
+}
+
+// ══════════════════════
+//  RENDER
+// ══════════════════════
+function render() {
+  g.save();
+  if (state === 'play') g.translate(shX, shY);
+  if (state === 'menu')         drawMenu();
+  else if (state === 'gameover') drawGameOver();
+  else if (state === 'name')    drawNameEntry();
+  else                          drawGameplay();
+  g.restore();
+
+  if (trauma > 0.25 && state === 'play') {
+    g.fillStyle = `rgba(160,48,32,${(trauma - 0.25) * 0.3})`;
+    g.fillRect(0, 0, W, H);
+  }
+
+  sx.fillStyle = '#000'; sx.fillRect(0, 0, scr.width, scr.height);
+  const scale = Math.min(scr.width / W, scr.height / H);
+  const dx = (scr.width - W * scale) / 2, dy = (scr.height - H * scale) / 2;
+  sx.drawImage(buf, dx, dy, W * scale, H * scale);
+}
+
+resize();
+(function loop(now) { update(now); render(); requestAnimationFrame(loop); })(0);
+</script>
+</body>
+</html>
