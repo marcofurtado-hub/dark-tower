@@ -2,6 +2,7 @@
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>DARK TOWER</title>
 <style>
 * { margin: 0; padding: 0; }
@@ -86,12 +87,12 @@ function waveStats() {
   const w = waveNum;
   // Visual scale: 3.5 (big) wave 1 → 1.0 (tiny) by wave 25+
   const enScale = Math.max(1.0, 3.5 - (w - 1) * 0.12);
-  // Speed: slow start, accelerates noticeably each wave
-  const speed = 0.06 + w * 0.03 + Math.floor(w / 5) * 0.02;
-  // HP: 1 early, STEEP growth — you FEEL each wave getting tougher
-  const hp = Math.max(1, Math.floor(1 + w * 0.8 + Math.pow(w, 1.3) * 0.15));
-  // Count: few early, swarms later
-  const count = Math.min(50, 3 + Math.floor(w * 2) + Math.floor(w / 5) * 3);
+  // Speed: VERY slow start, accelerates each wave
+  const speed = w <= 2 ? 0.04 + w * 0.01 : 0.06 + w * 0.025 + Math.floor(w / 5) * 0.02;
+  // HP: 1 for waves 1-3, then grows steeply
+  const hp = w <= 3 ? 1 : Math.max(1, Math.floor(w * 0.7 + Math.pow(w, 1.3) * 0.12));
+  // Count: MORE enemies early (swarm of easy targets), keeps growing
+  const count = Math.min(55, 8 + Math.floor(w * 2.5) + Math.floor(w / 5) * 3);
   // Spawn interval: generous early, frantic later
   const spawnDelay = Math.max(150, 1200 - w * 55);
   // Pause between waves: breathe early, pressure later
@@ -383,6 +384,27 @@ document.addEventListener('keydown', e => {
 });
 document.addEventListener('keyup', e => keys[e.code] = false);
 
+// ── Mobile Touch Controls (invisible slider) ──
+let touchActive = false, touchX = 0;
+document.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (state === 'menu') { initAudio(); startGame(); return; }
+  if (state === 'gameover' && gameOverTimer > 90) { state = 'name'; nameInput = ''; return; }
+  touchActive = true;
+  touchX = e.touches[0].clientX;
+  // Map horizontal position to tower angle
+  const ratio = touchX / innerWidth; // 0=left, 1=right
+  tower.angle = -PI + 0.1 + ratio * (PI - 0.2);
+}, { passive: false });
+document.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (!touchActive || state !== 'play') return;
+  touchX = e.touches[0].clientX;
+  const ratio = touchX / innerWidth;
+  tower.angle = -PI + 0.1 + ratio * (PI - 0.2);
+}, { passive: false });
+document.addEventListener('touchend', e => { touchActive = false; });
+
 function saveRank() {
   ranks.push({ name: nameInput, score, time: Math.floor(time), wave: waveNum, combo: bestCombo });
   ranks.sort((a, b) => b.score - a.score);
@@ -536,9 +558,12 @@ let city;
 function buildCity() {
   city = [];
   const n = Math.floor(W / 34);
+  const towerLeft = tower.x - 22, towerRight = tower.x + 22;
   for (let i = 0; i < n; i++) {
     const spr = BLDG[(i * 7 + 3) % BLDG.length];
     const x = i * 34 + 2 + ((i * 11) % 5);
+    // Skip buildings that overlap the tower
+    if (x + 30 > towerLeft && x < towerRight) continue;
     const segs = spr.map((row, ri) => ({ row, y: GND - spr.length * 3 + ri * 3, ok: true }));
     city.push({ x, w: 30, segs });
   }
@@ -564,18 +589,29 @@ function damageCity(ex) {
   let best = null, bd = 999;
   for (const b of city) { const d = Math.abs(ex - (b.x + b.w / 2)); if (d < bd) { bd = d; best = b; } }
   if (!best || bd > 30) return;
-  let n = 0;
-  for (let i = best.segs.length - 1; i >= 0 && n < 4; i--) {
-    if (best.segs[i].ok) {
-      best.segs[i].ok = false; n++;
-      for (let p = 0; p < 6; p++)
-        particles.push({ x: best.x + Math.random() * best.w, y: best.segs[i].y,
-          vx: (Math.random() - 0.5) * 3, vy: -Math.random() * 3 - 1, life: 40, ml: 40, sz: 2, col: C.bone });
-    }
+  // Destroy 2-3 random segments (creates holes, not top-down slice)
+  const okSegs = [];
+  for (let i = 0; i < best.segs.length; i++) if (best.segs[i].ok) okSegs.push(i);
+  const destroyCount = Math.min(okSegs.length, 2 + Math.floor(Math.random() * 2));
+  // Pick segments near a random impact point
+  const impactIdx = okSegs[Math.floor(Math.random() * okSegs.length)];
+  okSegs.sort((a, b) => Math.abs(a - impactIdx) - Math.abs(b - impactIdx));
+  for (let n = 0; n < destroyCount; n++) {
+    const si = okSegs[n];
+    best.segs[si].ok = false;
+    // Debris falls DOWN with gravity (small upward pop then falls)
+    for (let p = 0; p < 5; p++)
+      particles.push({ x: best.x + Math.random() * best.w, y: best.segs[si].y,
+        vx: (Math.random() - 0.5) * 2.5, vy: -Math.random() * 1.5, life: 50, ml: 50,
+        sz: 1 + Math.floor(Math.random() * 3), col: Math.random() > 0.3 ? C.bone : '#887766' });
   }
-  for (let p = 0; p < 4; p++)
-    particles.push({ x: ex + (Math.random() - 0.5) * 16, y: GND - Math.random() * 12,
-      vx: (Math.random() - 0.5) * 2, vy: -Math.random() * 2, life: 25, ml: 25, sz: 2, col: C.red });
+  // Explosion flash at impact
+  particles.push({ x: ex, y: GND - 8, vx: 0, vy: 0, life: 10, ml: 10, sz: 0, col: C.red2, ring: true, ringR: 4 });
+  // Fiery explosion particles
+  for (let p = 0; p < 8; p++)
+    particles.push({ x: ex + (Math.random() - 0.5) * 14, y: GND - 4 - Math.random() * 10,
+      vx: (Math.random() - 0.5) * 3, vy: -Math.random() * 1.2, life: 20, ml: 20,
+      sz: 2, col: Math.random() > 0.5 ? C.red : C.gold });
 }
 
 // ══════════════════════
@@ -1217,9 +1253,20 @@ function drawBG() {
       g.fillRect(i, top, 4, GND - top);
     }
   }
-  g.fillStyle = '#444';
-  for (let i = 0; i < 60; i++) { const sx2 = (i * 137 + 29) % W, sy = (i * 97 + 13) % (GND - 120);
-    if (Math.sin(Date.now() * 0.0006 + i * 0.9) > 0.3) g.fillRect(sx2, sy, 2, 2); }
+  // Stars — seeded pseudo-random for natural look
+  for (let i = 0; i < 80; i++) {
+    // Pseudo-random positions using golden ratio hashing
+    const px = ((i * 0.618033988 * 997) % 1) * W;
+    const py = ((i * 0.618033988 * 631 + 0.3) % 1) * (GND - 130);
+    const bright = 40 + ((i * 73) % 50);
+    const twinkle = Math.sin(Date.now() * (0.0003 + (i % 7) * 0.0001) + i * 2.1);
+    if (twinkle > -0.2) {
+      const alpha = 0.3 + twinkle * 0.35;
+      g.fillStyle = `rgba(${bright + 60},${bright + 55},${bright + 80},${alpha})`;
+      const sz = (i % 5 === 0) ? 2 : 1;
+      g.fillRect(Math.floor(px), Math.floor(py), sz, sz);
+    }
+  }
   g.fillStyle = C.mid; g.fillRect(0, GND, W, 2);
   g.fillStyle = C.dark; g.fillRect(0, GND + 2, W, H - GND - 2);
 }
@@ -1425,7 +1472,7 @@ function drawHUD() {
   const min = Math.floor(time / 60), sec = Math.floor(time % 60);
   g.fillStyle = C.bone; g.textAlign = 'left';
   g.fillText(`${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}`, 8, 8);
-  g.fillText(`${score}`, 8, 26);
+  g.fillStyle = C.gold; g.fillText(`SCORE ${score}`, 8, 26);
   g.textAlign = 'right'; g.fillStyle = C.light;
   g.fillText(`HI ${hi}`, W - 8, 8);
 
@@ -1575,19 +1622,19 @@ function drawGameOver() {
 
   // GAME OVER title
   g.font = `bold 38px ${F}`;
-  g.fillStyle = 'rgba(0,0,0,0.5)'; g.fillText('GAME OVER', W / 2 + 3, textY + 3);
-  g.fillStyle = '#1a0508'; g.fillText('GAME OVER', W / 2, textY);
+  g.fillStyle = 'rgba(0,0,0,0.6)'; g.fillText('GAME OVER', W / 2 + 3, textY + 3);
+  g.fillStyle = C.bone; g.fillText('GAME OVER', W / 2, textY);
 
   // Stats
-  g.font = `bold 14px ${F}`; g.fillStyle = '#2a0810';
+  g.font = `bold 14px ${F}`; g.fillStyle = C.white;
   const min = Math.floor(time / 60), sec = Math.floor(time % 60);
   g.fillText(`SURVIVED  ${min}m ${sec}s`, W / 2, textY + 35);
-  g.fillText(`SCORE  ${score}`, W / 2, textY + 55);
-  g.font = `13px ${F}`;
+  g.fillStyle = C.gold; g.fillText(`SCORE  ${score}`, W / 2, textY + 55);
+  g.font = `13px ${F}`; g.fillStyle = C.light;
   g.fillText(`WAVE: ${waveNum}   WEAPON: ${WNAME[weapon]}   BEST COMBO: ${bestCombo}`, W / 2, textY + 75);
 
   if (score >= hi && score > 0) {
-    g.font = `bold 16px ${F}`; g.fillStyle = '#2a0810';
+    g.font = `bold 16px ${F}`; g.fillStyle = C.gold;
     g.fillText('NEW HIGH SCORE', W / 2, textY + 100);
   }
 
@@ -1596,7 +1643,7 @@ function drawGameOver() {
     const blink = Math.floor(Date.now() / 500) % 2;
     if (blink) {
       g.font = `bold 16px ${F}`; g.fillStyle = `rgba(${150 + Math.floor(ey * 60)},25,15,0.85)`;
-      g.fillText('PRESS ENTER TO CONTINUE', W / 2, H - 40);
+      g.fillText('ontouchstart' in window ? 'TAP TO CONTINUE' : 'PRESS ENTER TO CONTINUE', W / 2, H - 40);
     }
   }
 
@@ -1656,9 +1703,15 @@ function drawNameEntry() {
 // ══════════════════════
 function drawMenu() {
   g.fillStyle = C.bg; g.fillRect(0, 0, W, H);
-  g.fillStyle = '#444';
-  for (let i = 0; i < 40; i++) { const sx2 = (i * 137 + 29) % W, sy = (i * 97 + 13) % H;
-    if (Math.sin(Date.now() * 0.001 + i) > 0.3) g.fillRect(sx2, sy, 2, 2); }
+  for (let i = 0; i < 60; i++) {
+    const px = ((i * 0.618033988 * 997) % 1) * W;
+    const py = ((i * 0.618033988 * 631 + 0.3) % 1) * (H - 80);
+    const twinkle = Math.sin(Date.now() * (0.0004 + (i % 5) * 0.00015) + i * 1.7);
+    if (twinkle > -0.1) {
+      g.fillStyle = `rgba(120,118,140,${0.3 + twinkle * 0.3})`;
+      g.fillRect(Math.floor(px), Math.floor(py), (i % 7 === 0) ? 2 : 1, 1);
+    }
+  }
 
   g.textAlign = 'center'; g.textBaseline = 'middle';
   g.font = `bold 36px ${F}`; g.fillStyle = C.bone;
@@ -1675,7 +1728,8 @@ function drawMenu() {
   }
 
   g.font = `bold 12px ${F}`; g.fillStyle = C.light;
-  g.fillText('[A/D] AIM   [F] FULLSCREEN   [M] MUTE', W / 2, 135);
+  const isMob = 'ontouchstart' in window;
+  g.fillText(isMob ? 'SLIDE TO AIM \u2014 AUTO FIRE' : '[A/D] AIM   [F] FULLSCREEN   [M] MUTE', W / 2, 135);
   g.fillText('SHOOT CRATES FOR WEAPON UPGRADES & POWER-UPS', W / 2, 152);
   g.fillText('ENEMIES SHRINK & SPEED UP EACH WAVE \u2014 BOSS EVERY 5', W / 2, 169);
 
@@ -1702,7 +1756,8 @@ function drawMenu() {
 
   if (Math.floor(Date.now() / 500) % 2 === 0) {
     g.font = `bold 16px ${F}`; g.fillStyle = C.bone;
-    g.fillText('PRESS ENTER TO START', W / 2, H - 35);
+    const isMobile = 'ontouchstart' in window;
+    g.fillText(isMobile ? 'TAP TO START' : 'PRESS ENTER TO START', W / 2, H - 35);
   }
   drawAtmo();
 }
