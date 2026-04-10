@@ -108,35 +108,38 @@ let waveActive = false, wavePause = false, wavePauseTimer = 0;
 let waveAnnounce = 0, waveAnnounceTxt = '';
 let bossAlive = null;
 
-// ── Phased difficulty: steep but fair progression ──
+// ── Phased difficulty: dynamic & aggressive ──
 function waveStats() {
   const w = waveNum;
-  // Visual scale: 3.5 (big) wave 1 → 1.0 (tiny) by wave 25+
-  const enScale = Math.max(1.0, 3.5 - (w - 1) * 0.12);
-  // Speed: VERY slow start, accelerates each wave
-  const speed = w <= 2 ? 0.04 + w * 0.01 : 0.06 + w * 0.025 + Math.floor(w / 5) * 0.02;
-  // HP: 1 for waves 1-3, then grows steeply
-  const hp = w <= 3 ? 1 : Math.max(1, Math.floor(w * 0.7 + Math.pow(w, 1.3) * 0.12));
-  // Count: MORE enemies early (swarm of easy targets), keeps growing
-  const count = Math.min(55, 8 + Math.floor(w * 2.5) + Math.floor(w / 5) * 3);
-  // Spawn interval: generous early, frantic later
-  const spawnDelay = Math.max(150, 1200 - w * 55);
-  // Pause between waves: breathe early, pressure later
-  const pauseTime = Math.max(2000, 5000 - w * 180);
-  // Max enemy tier: new enemy types unlock gradually
-  const maxTier = w <= 2 ? 0 : w <= 4 ? 1 : w <= 7 ? 2 : w <= 10 ? 3 : w <= 14 ? 5 : 7;
-  // Flank chance: more directions later
-  const flankChance = Math.min(0.55, w * 0.03);
+  // Visual scale: 3.5 (big) wave 1 → 1.0 (tiny) by wave 20+
+  const enScale = Math.max(1.0, 3.5 - (w - 1) * 0.15);
+  // Speed: gentle start, ramps fast — game feels urgent by wave 5
+  const speed = w <= 2 ? 0.05 + w * 0.015
+    : 0.08 + w * 0.03 + Math.floor(w / 5) * 0.025;
+  // HP: 1 for wave 1-2, then steep curve
+  const hp = w <= 2 ? 1 : Math.max(1, Math.floor(w * 0.9 + Math.pow(w, 1.35) * 0.15));
+  // Count: BIG swarms from the start, overwhelming later
+  const count = Math.min(60, 10 + Math.floor(w * 3) + Math.floor(w / 5) * 4);
+  // Spawn interval: tight from the start, frantic later
+  const spawnDelay = Math.max(120, 900 - w * 50);
+  // Pause between waves: SHORT — keeps pressure up
+  const pauseTime = Math.max(1500, 3500 - w * 150);
+  // Max enemy tier: unlock faster
+  const maxTier = w <= 2 ? 0 : w <= 3 ? 1 : w <= 5 ? 2 : w <= 8 ? 3 : w <= 12 ? 5 : 7;
+  // Flank chance: flankers come early and often
+  const flankChance = Math.min(0.6, 0.05 + w * 0.04);
+  // Enemy homing strength: they seek the tower more aggressively each wave
+  const homingStr = Math.min(0.012, 0.004 + w * 0.0005);
   // Phase label
   let phase;
   if (w <= 2) phase = 'EASY TARGETS';
   else if (w <= 4) phase = 'WARMING UP';
-  else if (w <= 7) phase = 'GETTING HARDER';
-  else if (w <= 10) phase = 'INTENSE';
-  else if (w <= 14) phase = 'BRUTAL';
-  else if (w <= 18) phase = 'NIGHTMARE';
+  else if (w <= 6) phase = 'GETTING HARDER';
+  else if (w <= 9) phase = 'INTENSE';
+  else if (w <= 12) phase = 'BRUTAL';
+  else if (w <= 16) phase = 'NIGHTMARE';
   else phase = 'IMPOSSIBLE';
-  return { enScale, speed, hp, count, spawnDelay, pauseTime, maxTier, flankChance, phase };
+  return { enScale, speed, hp, count, spawnDelay, pauseTime, maxTier, flankChance, homingStr, phase };
 }
 
 function nextWave() {
@@ -283,12 +286,154 @@ function sfx(name) {
   }
 }
 
-// ── Music ──
-const BASS_NOTES = [55, 55, 73.4, 65.4, 55, 55, 73.4, 82.4];
-const MELODY_NOTES = [220, 261.6, 293.7, 261.6, 220, 196, 220, 261.6];
-const BOSS_BASS = [55, 55, 41.2, 49, 55, 55, 41.2, 36.7];
-const BOSS_MELODY = [196, 220, 196, 174.6, 164.8, 174.6, 196, 220];
+// ══════════════════════════════════════
+//  MUSIC — 1-minute 8-bit chip-tune loop
+//  4 channels: melody, bass, arpeggio, drums
+//  Sections: intro(8) → verse(16) → chorus(16) → verse2(16) → bridge(8) → chorus2(16) → outro(8)
+// ══════════════════════════════════════
 let musicStep = 0;
+const BPM = 140;
+const STEP_MS = Math.round(60000 / BPM / 2); // 16th-note ≈ 214ms
+
+// Note helper: name → frequency
+const NT = (() => {
+  const names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+  const map = {};
+  for (let oct = 1; oct <= 7; oct++)
+    for (let i = 0; i < 12; i++)
+      map[names[i] + oct] = 440 * Math.pow(2, (i - 9 + (oct - 4) * 12) / 12);
+  map['R'] = 0; // rest
+  return map;
+})();
+
+// ── Song data: 88 steps (~1 min at 140 BPM) ──
+// Melody (square wave, lead)
+const M_MEL = [
+  // INTRO (8 steps) — rising arpeggio
+  'A3','C4','E4','A4','R','A4','G4','E4',
+  // VERSE 1 (16 steps) — catchy minor melody
+  'A4','R','C5','A4','G4','R','E4','G4',
+  'A4','R','C5','D5','E5','R','D5','C5',
+  // CHORUS (16 steps) — soaring, energetic
+  'E5','E5','R','D5','C5','R','A4','C5',
+  'D5','D5','R','C5','A4','R','G4','A4',
+  // VERSE 2 (16 steps) — variation with runs
+  'A4','C5','E5','C5','A4','R','G4','A4',
+  'C5','E5','G5','E5','D5','C5','A4','R',
+  // BRIDGE (8 steps) — tension builder
+  'F5','E5','D5','C5','D5','E5','F5','E5',
+  // CHORUS 2 (16 steps) — climactic
+  'A5','R','G5','E5','R','C5','E5','G5',
+  'A5','G5','E5','C5','D5','E5','A4','R',
+  // OUTRO (8 steps) — wind down
+  'E5','D5','C5','A4','G4','E4','A3','R',
+];
+
+// Bass (triangle wave)
+const M_BASS = [
+  // INTRO
+  'A2','A2','A2','A2','E2','E2','E2','E2',
+  // VERSE 1
+  'A2','A2','A2','A2','C3','C3','C3','C3',
+  'F2','F2','F2','F2','G2','G2','G2','G2',
+  // CHORUS
+  'A2','A2','E2','E2','F2','F2','C3','C3',
+  'D3','D3','A2','A2','E2','E2','A2','A2',
+  // VERSE 2
+  'A2','A2','C3','C3','F2','F2','G2','G2',
+  'A2','A2','E2','E2','F2','F2','G2','G2',
+  // BRIDGE
+  'F2','F2','G2','G2','A2','A2','E2','E2',
+  // CHORUS 2
+  'A2','A2','E2','E2','F2','F2','C3','C3',
+  'A2','A2','G2','G2','F2','F2','E2','E2',
+  // OUTRO
+  'A2','A2','E2','E2','F2','F2','A2','A2',
+];
+
+// Arpeggio channel (square wave, soft — adds shimmer)
+const M_ARP = [
+  // INTRO
+  'A3','C4','E4','A3','C4','E4','A3','E4',
+  // VERSE 1
+  'A3','E4','A3','C4','E4','C4','E4','G4',
+  'F3','A3','C4','F3','G3','B3','D4','G3',
+  // CHORUS
+  'A3','C4','E4','A3','F3','A3','C4','F3',
+  'D3','F3','A3','D3','E3','G3','B3','E3',
+  // VERSE 2
+  'A3','E4','C4','A3','F3','C4','A3','F3',
+  'A3','C4','E4','G4','F3','A3','D4','F3',
+  // BRIDGE
+  'F3','A3','C4','F3','G3','B3','D4','G3',
+  // CHORUS 2
+  'A3','C4','E4','A4','F3','A3','C4','F4',
+  'A3','E4','C4','A3','F3','D4','A3','E3',
+  // OUTRO
+  'A3','C4','E4','A3','E3','G3','A3','R',
+];
+
+// Drum patterns: K=kick, S=snare, H=hihat, R=rest
+const M_DRUM = [
+  // INTRO (8) — builds up
+  'H','R','H','R','K','H','S','H',
+  // VERSE 1 (16) — standard beat
+  'K','H','S','H','K','H','S','H',
+  'K','H','S','H','K','K','S','H',
+  // CHORUS (16) — driving
+  'K','H','S','K','H','K','S','H',
+  'K','K','S','H','K','H','S','S',
+  // VERSE 2 (16) — groove
+  'K','H','S','H','K','H','S','H',
+  'K','H','S','K','K','H','S','H',
+  // BRIDGE (8) — breakdown
+  'K','R','S','R','K','R','S','K',
+  // CHORUS 2 (16) — intense
+  'K','K','S','H','K','K','S','H',
+  'K','K','S','K','S','K','S','S',
+  // OUTRO (8) — fade
+  'K','H','S','H','K','R','S','R',
+];
+
+// Boss overlay: darker bass notes, replace melody
+const BOSS_MEL = ['E4','R','E4','D4','C4','R','B3','C4','D4','R','D4','C4','B3','R','A3','R'];
+const BOSS_BASS_N = ['A1','A1','A1','A1','E1','E1','E1','E1','F1','F1','F1','F1','E1','E1','E1','E1'];
+
+function playMusicNote(freq, dur, type, vol, detune2) {
+  if (!freq || freq === 0 || muted || !audioCtx) return;
+  const o = audioCtx.createOscillator();
+  const gn = audioCtx.createGain();
+  o.type = type;
+  o.frequency.value = freq;
+  if (detune2) o.detune.value = detune2;
+  gn.gain.setValueAtTime(vol, audioCtx.currentTime);
+  gn.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+  o.connect(gn); gn.connect(musicGain);
+  o.start(); o.stop(audioCtx.currentTime + dur);
+}
+
+function playDrum(type) {
+  if (muted || !audioCtx) return;
+  const t = audioCtx.currentTime;
+  if (type === 'K') {
+    // Kick: short low punch
+    const o = audioCtx.createOscillator();
+    const gn = audioCtx.createGain();
+    o.type = 'sine'; o.frequency.setValueAtTime(150, t);
+    o.frequency.exponentialRampToValueAtTime(30, t + 0.1);
+    gn.gain.setValueAtTime(0.06, t);
+    gn.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+    o.connect(gn); gn.connect(musicGain);
+    o.start(t); o.stop(t + 0.12);
+  } else if (type === 'S') {
+    // Snare: noise burst + tone
+    playNoise(0.08, 0.04, musicGain);
+    playMusicNote(200, 0.06, 'square', 0.02);
+  } else if (type === 'H') {
+    // Hi-hat: very short noise
+    playNoise(0.03, 0.02, musicGain);
+  }
+}
 
 function startMusic() {
   if (musicPlaying || !audioCtx) return;
@@ -296,18 +441,46 @@ function startMusic() {
   musicStep = 0;
   musicInterval = setInterval(() => {
     if (muted || state !== 'play') return;
+    const totalSteps = M_MEL.length; // 88 steps
+    const idx = musicStep % totalSteps;
     const isBoss = bossAlive != null;
-    const bass = isBoss ? BOSS_BASS : BASS_NOTES;
-    const mel = isBoss ? BOSS_MELODY : MELODY_NOTES;
-    const idx = musicStep % bass.length;
-    playTone(bass[idx], 0.15, 'triangle', 0.04, musicGain);
-    playTone(mel[idx], 0.12, 'square', 0.025, musicGain);
-    if (musicStep % 2 === 0) playNoise(0.05, 0.02, musicGain);
-    if (time > 60) {
-      playTone(bass[idx] * 2, 0.08, 'square', 0.015, musicGain, 5);
+    const stepDur = STEP_MS / 1000;
+
+    // ── Melody ──
+    if (isBoss) {
+      const bIdx = musicStep % BOSS_MEL.length;
+      const mf = NT[BOSS_MEL[bIdx]];
+      if (mf) playMusicNote(mf, stepDur * 0.85, 'square', 0.03);
+    } else {
+      const mf = NT[M_MEL[idx]];
+      if (mf) playMusicNote(mf, stepDur * 0.8, 'square', 0.03);
     }
+
+    // ── Bass ──
+    if (isBoss) {
+      const bIdx = musicStep % BOSS_BASS_N.length;
+      const bf = NT[BOSS_BASS_N[bIdx]];
+      if (bf) playMusicNote(bf, stepDur * 0.9, 'triangle', 0.045);
+    } else {
+      const bf = NT[M_BASS[idx]];
+      if (bf) playMusicNote(bf, stepDur * 0.9, 'triangle', 0.04);
+    }
+
+    // ── Arpeggio (every other step for shimmer) ──
+    if (!isBoss) {
+      const af = NT[M_ARP[idx]];
+      if (af) playMusicNote(af, stepDur * 0.3, 'square', 0.012, 7);
+    }
+
+    // ── Drums ──
+    const drumChar = M_DRUM[idx];
+    if (drumChar !== 'R') playDrum(drumChar);
+
+    // Boss gets double-time kick on even steps
+    if (isBoss && musicStep % 2 === 0) playDrum('K');
+
     musicStep++;
-  }, 200);
+  }, STEP_MS);
 }
 
 function stopMusic() {
@@ -683,11 +856,11 @@ function diff() {
   return {
     speed: ws.speed * slowMod,
     hp: ws.hp,
-    fire: Math.max(60, 220 - time * 0.4) * fireMod,
-    // Weapon crate: guaranteed early, slower later
-    crate: waveNum <= 2 ? 6000 : Math.max(5000, 14000 - waveNum * 400),
-    // Power-up crate: starts wave 3
-    powerCrate: waveNum < 3 ? 99999 : Math.max(8000, 22000 - waveNum * 500),
+    fire: Math.max(50, 180 - time * 0.5) * fireMod,
+    // Weapon crate: drops faster to keep up with difficulty
+    crate: waveNum <= 2 ? 5000 : Math.max(4000, 11000 - waveNum * 400),
+    // Power-up crate: starts wave 2
+    powerCrate: waveNum < 2 ? 99999 : Math.max(6000, 18000 - waveNum * 500),
   };
 }
 
@@ -1154,7 +1327,13 @@ function update(now) {
 
     e.x += e.vx; e.y += e.vy;
     const dx = tower.x - e.x, dy = tower.y - e.y, dd = Math.sqrt(dx * dx + dy * dy);
-    if (dd > 0) { e.vx += (dx / dd) * 0.001; e.vy += (dy / dd) * 0.004; }
+    const ws = waveStats();
+    // Enemies home in on tower — stronger each wave
+    if (dd > 0) { e.vx += (dx / dd) * ws.homingStr * 0.3; e.vy += (dy / dd) * ws.homingStr; }
+    // Jitter/dodge: enemies from wave 5+ have slight random movement
+    if (waveNum >= 5) {
+      e.vx += (Math.random() - 0.5) * 0.03 * Math.min(waveNum * 0.2, 2);
+    }
 
     if (e.y > GND - 10) {
       enemies.splice(i, 1); damageCity(e.x); sfx('cityHit');
