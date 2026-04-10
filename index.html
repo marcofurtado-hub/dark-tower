@@ -27,7 +27,14 @@ skullImg.src = 'skull.png';
 let skullLoaded = false;
 skullImg.onload = () => { skullLoaded = true; };
 
-const W = 640, H = 400;
+// ── Adaptive layout: portrait (mobile) vs landscape (desktop) ──
+let isPortrait = false;
+let W = 640, H = 400;
+{
+  const _m = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  if (_m && innerHeight > innerWidth * 1.2) { isPortrait = true; W = 400; H = 640; }
+}
+
 const buf = document.createElement('canvas');
 buf.width = W; buf.height = H;
 const g = buf.getContext('2d');
@@ -37,11 +44,30 @@ sx.imageSmoothingEnabled = false;
 const F = '"Courier New", monospace';
 const PI = Math.PI;
 
+let layoutReady = false; // tower exists after full script load
+function updateLayout() {
+  const _m = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  const por = _m && (innerHeight > innerWidth * 1.2);
+  if (por === isPortrait) return;
+  isPortrait = por;
+  W = isPortrait ? 400 : 640;
+  H = isPortrait ? 640 : 400;
+  GND = H - 45;
+  buf.width = W; buf.height = H;
+  if (layoutReady) {
+    tower.x = W / 2; tower.y = GND - 6;
+    if (state === 'play') buildCity();
+  }
+}
+
 function resize() {
   scr.width = innerWidth; scr.height = innerHeight;
   sx.imageSmoothingEnabled = false;
+  updateLayout();
 }
-addEventListener('resize', resize); resize();
+addEventListener('resize', resize);
+addEventListener('orientationchange', () => setTimeout(resize, 250));
+resize();
 
 // ── Palette ──
 const C = {
@@ -54,7 +80,7 @@ const C = {
 };
 
 // ── Ground ──
-const GND = H - 45;
+let GND = H - 45;
 
 // ── State ──
 let state = 'menu';
@@ -190,7 +216,10 @@ function sfx(name) {
   const t = audioCtx.currentTime;
   switch (name) {
     case 'shoot':
-      playTone(800, 0.06, 'square', 0.06);
+      // 8-bit cannon: deep punch + percussive blast
+      playTone(90, 0.14, 'square', 0.09);    // deep cannon thump
+      playTone(55, 0.10, 'sawtooth', 0.06);  // low rumble body
+      playNoise(0.06, 0.07);                 // blast crack
       break;
     case 'hit':
       playTone(200, 0.08, 'square', 0.05);
@@ -384,24 +413,35 @@ document.addEventListener('keydown', e => {
 });
 document.addEventListener('keyup', e => keys[e.code] = false);
 
-// ── Mobile Touch Controls (invisible slider) ──
-let touchActive = false, touchX = 0;
+// ── Mobile Touch Controls (semi-circle arc) ──
+// Touch anywhere: angle is calculated from tower to touch point
+// This maps naturally to the tower's semi-circle rotation arc
+let touchActive = false;
+function touchToAngle(clientX, clientY) {
+  // Convert screen coords → game coords
+  const scale = Math.min(scr.width / W, scr.height / H);
+  const ox = (scr.width - W * scale) / 2;
+  const oy = (scr.height - H * scale) / 2;
+  const gx = (clientX - ox) / scale;
+  const gy = (clientY - oy) / scale;
+  // Angle from tower barrel to touch point
+  const ang = Math.atan2(gy - (tower.y - 16), gx - tower.x);
+  // Clamp to upper semi-circle (-PI+0.1 to -0.1)
+  return Math.max(-PI + 0.1, Math.min(-0.1, ang));
+}
 document.addEventListener('touchstart', e => {
   e.preventDefault();
   if (state === 'menu') { initAudio(); startGame(); return; }
   if (state === 'gameover' && gameOverTimer > 90) { state = 'name'; nameInput = ''; return; }
   touchActive = true;
-  touchX = e.touches[0].clientX;
-  // Map horizontal position to tower angle
-  const ratio = touchX / innerWidth; // 0=left, 1=right
-  tower.angle = -PI + 0.1 + ratio * (PI - 0.2);
+  if (state === 'play') {
+    tower.angle = touchToAngle(e.touches[0].clientX, e.touches[0].clientY);
+  }
 }, { passive: false });
 document.addEventListener('touchmove', e => {
   e.preventDefault();
   if (!touchActive || state !== 'play') return;
-  touchX = e.touches[0].clientX;
-  const ratio = touchX / innerWidth;
-  tower.angle = -PI + 0.1 + ratio * (PI - 0.2);
+  tower.angle = touchToAngle(e.touches[0].clientX, e.touches[0].clientY);
 }, { passive: false });
 document.addEventListener('touchend', e => { touchActive = false; });
 
@@ -618,6 +658,7 @@ function damageCity(ex) {
 //  TOWER & WEAPONS
 // ══════════════════════
 const tower = { x: W / 2, y: GND - 6, angle: -PI / 2, lastShot: 0 };
+layoutReady = true; // tower now exists, layout changes can update it
 let weapon = 0;
 const WNAME = ['SINGLE', 'DOUBLE', 'TRIPLE', 'FAN', 'BURST', 'BEAM', 'PLASMA'];
 let beamOn = false, beamT = 0, beamCD = 0;
@@ -661,7 +702,9 @@ function tierForWave() {
 let spawnT = 0, crateT = 0, powerCrateT = 0, lastT = 0, beamDmgT = 0;
 
 function startGame() {
+  updateLayout(); // ensure correct dimensions for current orientation
   state = 'play'; time = 0; score = 0; weapon = 0; cityHP = MAX_HP;
+  tower.x = W / 2; tower.y = GND - 6;
   tower.angle = -PI / 2;
   beamOn = false; beamT = 0; beamCD = 0;
   bullets = []; enemies = []; crates = []; particles = []; floats = []; trails = [];
@@ -1515,7 +1558,7 @@ function drawHUD() {
   }
 
   // City HP bar
-  const barTotalW = 160;
+  const barTotalW = isPortrait ? 120 : 160;
   const pipX = W / 2 - barTotalW / 2;
   g.font = `10px ${F}`; g.textAlign = 'right'; g.fillStyle = C.light;
   g.fillText('CITY', pipX - 6, H - 14);
@@ -1583,8 +1626,8 @@ function drawGameOver() {
   }
 
   // ── SKULL PNG ──
-  const skSize = 180;
-  const skX = W / 2 - skSize / 2, skY = 10;
+  const skSize = isPortrait ? 220 : 180;
+  const skX = W / 2 - skSize / 2, skY = isPortrait ? 40 : 10;
   const ey = 0.4 + Math.sin(Date.now() * 0.004) * 0.6;
 
   if (skullLoaded) {
@@ -1621,21 +1664,26 @@ function drawGameOver() {
   g.textAlign = 'center'; g.textBaseline = 'middle';
 
   // GAME OVER title
-  g.font = `bold 38px ${F}`;
+  g.font = `bold ${isPortrait ? 32 : 38}px ${F}`;
   g.fillStyle = 'rgba(0,0,0,0.6)'; g.fillText('GAME OVER', W / 2 + 3, textY + 3);
   g.fillStyle = C.bone; g.fillText('GAME OVER', W / 2, textY);
 
   // Stats
-  g.font = `bold 14px ${F}`; g.fillStyle = C.white;
+  g.font = `bold ${isPortrait ? 13 : 14}px ${F}`; g.fillStyle = C.white;
   const min = Math.floor(time / 60), sec = Math.floor(time % 60);
   g.fillText(`SURVIVED  ${min}m ${sec}s`, W / 2, textY + 35);
   g.fillStyle = C.gold; g.fillText(`SCORE  ${score}`, W / 2, textY + 55);
-  g.font = `13px ${F}`; g.fillStyle = C.light;
-  g.fillText(`WAVE: ${waveNum}   WEAPON: ${WNAME[weapon]}   BEST COMBO: ${bestCombo}`, W / 2, textY + 75);
+  g.font = `${isPortrait ? 11 : 13}px ${F}`; g.fillStyle = C.light;
+  if (isPortrait) {
+    g.fillText(`WAVE: ${waveNum}   COMBO: ${bestCombo}`, W / 2, textY + 75);
+    g.fillText(`WEAPON: ${WNAME[weapon]}`, W / 2, textY + 92);
+  } else {
+    g.fillText(`WAVE: ${waveNum}   WEAPON: ${WNAME[weapon]}   BEST COMBO: ${bestCombo}`, W / 2, textY + 75);
+  }
 
   if (score >= hi && score > 0) {
     g.font = `bold 16px ${F}`; g.fillStyle = C.gold;
-    g.fillText('NEW HIGH SCORE', W / 2, textY + 100);
+    g.fillText('NEW HIGH SCORE', W / 2, textY + (isPortrait ? 115 : 100));
   }
 
   // Press enter prompt
@@ -1684,13 +1732,14 @@ function drawNameEntry() {
       const r = top[i], y = lbY + 22 + i * 20;
       const rm = Math.floor(r.time / 60), rs = r.time % 60;
       g.fillStyle = i === 0 ? C.red2 : C.bone; g.textAlign = 'left';
-      g.fillText(`${String(i + 1).padStart(2)}.`, W / 2 - 150, y);
-      g.fillText(r.name, W / 2 - 120, y);
+      const co = isPortrait ? 80 : 120;
+      g.fillText(`${String(i + 1).padStart(2)}.`, W / 2 - co - 30, y);
+      g.fillText(r.name, W / 2 - co, y);
       g.textAlign = 'right'; g.fillStyle = i === 0 ? C.red2 : C.light;
-      g.fillText(`${r.score}`, W / 2 + 60, y);
+      g.fillText(`${r.score}`, W / 2 + (isPortrait ? 35 : 60), y);
       g.fillStyle = C.mid;
-      g.fillText(`W${r.wave || '?'}`, W / 2 + 100, y);
-      g.fillText(`${rm}m${String(rs).padStart(2, '0')}s`, W / 2 + 145, y);
+      g.fillText(`W${r.wave || '?'}`, W / 2 + (isPortrait ? 65 : 100), y);
+      if (!isPortrait) g.fillText(`${rm}m${String(rs).padStart(2, '0')}s`, W / 2 + 145, y);
     }
   }
   const vg2 = g.createRadialGradient(W / 2, H / 2, H * 0.25, W / 2, H / 2, H * 0.6);
@@ -1714,44 +1763,58 @@ function drawMenu() {
   }
 
   g.textAlign = 'center'; g.textBaseline = 'middle';
-  g.font = `bold 36px ${F}`; g.fillStyle = C.bone;
-  g.fillText('DARK TOWER', W / 2, 50);
-  g.font = `14px ${F}`; g.fillStyle = C.light;
-  g.fillText('DEFEND THE CITY', W / 2, 78);
+  const por = isPortrait;
+  const my = por ? 60 : 0; // extra vertical spacing in portrait
+
+  g.font = `bold ${por ? 30 : 36}px ${F}`; g.fillStyle = C.bone;
+  g.fillText('DARK TOWER', W / 2, 50 + my * 0.3);
+  g.font = `${por ? 12 : 14}px ${F}`; g.fillStyle = C.light;
+  g.fillText('DEFEND THE CITY', W / 2, 78 + my * 0.3);
 
   // Alien parade
-  for (let i = 0; i < Math.min(8, E_SPR.length); i++) {
+  const paradeCount = por ? 6 : Math.min(8, E_SPR.length);
+  const paradeSpacing = por ? 20 : 22;
+  const paradeX = W / 2 - (paradeCount * paradeSpacing) / 2;
+  for (let i = 0; i < paradeCount; i++) {
     const frame = Math.floor(Date.now() / 300 + i) % 2 === 0;
     const bob = Math.sin(Date.now() * 0.003 + i * 1.5) * 3;
     const tier = Math.min(i, E_SPR.length - 1);
-    drawSpr(frame ? E_SPR[tier] : E_SPR_B[tier], W / 2 - 80 + i * 22, 95 + bob, 2);
+    drawSpr(frame ? E_SPR[tier] : E_SPR_B[tier], paradeX + i * paradeSpacing, 95 + my * 0.4 + bob, 2);
   }
 
-  g.font = `bold 12px ${F}`; g.fillStyle = C.light;
+  const infoY = 135 + my * 0.5;
+  g.font = `bold ${por ? 10 : 12}px ${F}`; g.fillStyle = C.light;
   const isMob = 'ontouchstart' in window;
-  g.fillText(isMob ? 'SLIDE TO AIM \u2014 AUTO FIRE' : '[A/D] AIM   [F] FULLSCREEN   [M] MUTE', W / 2, 135);
-  g.fillText('SHOOT CRATES FOR WEAPON UPGRADES & POWER-UPS', W / 2, 152);
-  g.fillText('ENEMIES SHRINK & SPEED UP EACH WAVE \u2014 BOSS EVERY 5', W / 2, 169);
+  g.fillText(isMob ? 'TOUCH TO AIM \u2014 AUTO FIRE' : '[A/D] AIM   [F] FULLSCREEN   [M] MUTE', W / 2, infoY);
+  g.fillText(por ? 'SHOOT CRATES FOR UPGRADES' : 'SHOOT CRATES FOR WEAPON UPGRADES & POWER-UPS', W / 2, infoY + 17);
+  g.fillText(por ? 'ENEMIES SHRINK EACH WAVE \u2014 BOSS EVERY 5' : 'ENEMIES SHRINK & SPEED UP EACH WAVE \u2014 BOSS EVERY 5', W / 2, infoY + 34);
 
-  g.font = `10px ${F}`; g.fillStyle = C.mid;
-  g.fillText('POWER-UPS: SHIELD \u2022 SLOW-MO \u2022 DOUBLE DMG \u2022 FIRE RATE \u2022 NUKE \u2022 TESLA \u2022 HOMING', W / 2, 188);
+  g.font = `${por ? 8 : 10}px ${F}`; g.fillStyle = C.mid;
+  if (por) {
+    g.fillText('SHIELD \u2022 SLOW-MO \u2022 DOUBLE DMG \u2022 FIRE RATE', W / 2, infoY + 52);
+    g.fillText('NUKE \u2022 TESLA \u2022 HOMING', W / 2, infoY + 64);
+  } else {
+    g.fillText('POWER-UPS: SHIELD \u2022 SLOW-MO \u2022 DOUBLE DMG \u2022 FIRE RATE \u2022 NUKE \u2022 TESLA \u2022 HOMING', W / 2, infoY + 53);
+  }
 
+  const hallY = infoY + (por ? 85 : 77);
   if (ranks.length > 0) {
     g.font = `bold 12px ${F}`; g.fillStyle = C.red;
-    g.fillText('\u2500\u2500\u2500 HALL OF DOOM \u2500\u2500\u2500', W / 2, 212);
-    g.font = `11px ${F}`;
+    g.fillText('\u2500\u2500\u2500 HALL OF DOOM \u2500\u2500\u2500', W / 2, hallY);
+    g.font = `${por ? 10 : 11}px ${F}`;
     const top5 = ranks.slice(0, 5);
+    const colOff = por ? 90 : 120;
     for (let i = 0; i < top5.length; i++) {
-      const r = top5[i], y = 232 + i * 18;
+      const r = top5[i], y = hallY + 20 + i * 18;
       g.fillStyle = i === 0 ? C.red2 : C.bone; g.textAlign = 'left';
-      g.fillText(`${i + 1}. ${r.name}`, W / 2 - 120, y);
+      g.fillText(`${i + 1}. ${r.name}`, W / 2 - colOff, y);
       g.textAlign = 'right'; g.fillStyle = i === 0 ? C.red2 : C.light;
-      g.fillText(`${r.score}`, W / 2 + 60, y);
-      g.fillStyle = C.mid; g.fillText(`W${r.wave || '?'}`, W / 2 + 100, y);
+      g.fillText(`${r.score}`, W / 2 + (por ? 40 : 60), y);
+      g.fillStyle = C.mid; g.fillText(`W${r.wave || '?'}`, W / 2 + (por ? 70 : 100), y);
     }
   } else {
     g.font = `12px ${F}`; g.fillStyle = C.mid;
-    g.fillText(`HIGH SCORE: ${hi}`, W / 2, 220);
+    g.fillText(`HIGH SCORE: ${hi}`, W / 2, hallY + 8);
   }
 
   if (Math.floor(Date.now() / 500) % 2 === 0) {
