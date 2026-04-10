@@ -118,10 +118,10 @@ function waveStats() {
     : 0.08 + w * 0.03 + Math.floor(w / 5) * 0.025;
   // HP: 1 for wave 1-2, then steep curve
   const hp = w <= 2 ? 1 : Math.max(1, Math.floor(w * 0.9 + Math.pow(w, 1.35) * 0.15));
-  // Count: BIG swarms from the start, overwhelming later
-  const count = Math.min(60, 10 + Math.floor(w * 3) + Math.floor(w / 5) * 4);
-  // Spawn interval: tight from the start, frantic later
-  const spawnDelay = Math.max(120, 900 - w * 50);
+  // Count: MASSIVE swarms from wave 1, overwhelming floods later
+  const count = Math.min(80, 15 + Math.floor(w * 4) + Math.floor(w / 3) * 5);
+  // Spawn interval: rapid fire — screen fills fast
+  const spawnDelay = Math.max(80, 700 - w * 45);
   // Pause between waves: SHORT — keeps pressure up
   const pauseTime = Math.max(1500, 3500 - w * 150);
   // Max enemy tier: unlock faster
@@ -142,22 +142,23 @@ function waveStats() {
   return { enScale, speed, hp, count, spawnDelay, pauseTime, maxTier, flankChance, homingStr, phase };
 }
 
+let bossSpawned = false; // tracks if boss has been spawned this wave
+
 function nextWave() {
   waveNum++;
-  // EVERY wave has a boss! Plus normal enemies from wave 2+
-  waveType = 'BOSS';
+  waveType = 'NORMAL'; // starts with normal enemies, boss spawns at end
   waveActive = true;
   waveSpawnCount = 0;
-  waveAnnounce = 100;
+  bossSpawned = false;
+  waveAnnounce = 80;
   const ws = waveStats();
   waveAnnounceTxt = `WAVE ${waveNum}: ${ws.phase}`;
-  sfx('bossWarn');
   sfx('waveStart');
 }
 
 function getWaveSpawnCount() {
-  // Boss + normal enemies: 1 boss + wave enemies
-  return 1 + (waveNum >= 2 ? waveStats().count : 0);
+  // LOTS of normal aliens + 1 boss at the end
+  return waveStats().count;
 }
 
 function getWaveSpawnDelay() {
@@ -167,7 +168,7 @@ function getWaveSpawnDelay() {
 // ══════════════════════
 //  AUDIO - Web Audio API
 // ══════════════════════
-let audioCtx = null, masterGain = null, musicGain = null;
+let audioCtx = null, masterGain = null, musicGain = null, sfxGain = null;
 let muted = false, volume = 0.5, sfxVol = 0.5, musicVol = 0.45;
 let musicPlaying = false, musicInterval = null;
 
@@ -177,8 +178,12 @@ function initAudio() {
   masterGain = audioCtx.createGain();
   masterGain.gain.value = volume;
   masterGain.connect(audioCtx.destination);
+  // Separate gain nodes for SFX and Music
+  sfxGain = audioCtx.createGain();
+  sfxGain.gain.value = sfxVol;
+  sfxGain.connect(masterGain);
   musicGain = audioCtx.createGain();
-  musicGain.gain.value = 0.45; // LOUD — DOOM style
+  musicGain.gain.value = musicVol;
   musicGain.connect(masterGain);
 }
 
@@ -191,7 +196,7 @@ function playTone(freq, dur, type, vol, dest, detune) {
   if (detune) o.detune.value = detune;
   g2.gain.value = vol || 0.1;
   g2.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
-  o.connect(g2); g2.connect(dest || masterGain);
+  o.connect(g2); g2.connect(dest || sfxGain || masterGain);
   o.start(); o.stop(audioCtx.currentTime + dur);
 }
 
@@ -206,7 +211,7 @@ function playNoise(dur, vol, dest) {
   const g2 = audioCtx.createGain();
   g2.gain.value = vol || 0.08;
   g2.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
-  src.connect(g2); g2.connect(dest || masterGain);
+  src.connect(g2); g2.connect(dest || sfxGain || masterGain);
   src.start();
 }
 
@@ -302,13 +307,7 @@ const NT = (() => {
   return map;
 })();
 
-let sfxGain = null;
-function initSfxGain() {
-  if (sfxGain || !audioCtx) return;
-  sfxGain = audioCtx.createGain();
-  sfxGain.gain.value = 0.5;
-  sfxGain.connect(masterGain);
-}
+// sfxGain is created in initAudio()
 
 // ── DOOM riff — 96 steps (~1 min at 155BPM) ──
 // Lead: aggressive sawtooth melody, E minor / diminished
@@ -419,7 +418,6 @@ function playDrum(type) {
 
 function startMusic() {
   if (musicPlaying || !audioCtx) return;
-  initSfxGain();
   musicPlaying = true;
   musicStep = 0;
   musicInterval = setInterval(() => {
@@ -910,7 +908,7 @@ function startGame() {
   trauma = 0; freeze = 0;
   waveNum = 0; waveType = ''; waveTimer = 0; waveSpawnCount = 0;
   waveActive = false; wavePause = true; wavePauseTimer = 3000;
-  waveAnnounce = 0; bossAlive = null;
+  waveAnnounce = 0; bossAlive = null; bossSpawned = false;
   comboCount = 0; comboTimer = 0; comboMult = 1; bestCombo = 0;
   activePowerup = null; powerupTimer = 0; powerupType = '';
   shieldHP = 0; teslaActive = false; homingActive = false;
@@ -963,39 +961,43 @@ function explodeBullet(b) {
   trauma += 0.12;
 }
 
-// ── Spawn enemies ──
+// ── Spawn boss (called when all normal enemies have been spawned) ──
+function spawnBoss() {
+  const bossNumber = waveNum;
+  const bossTypes = ['golem', 'wraith', 'divider', 'hydra'];
+  const bossIdx = (bossNumber - 1) % bossTypes.length;
+  const bType = bossTypes[bossIdx];
+  // BRUTAL HP: exponential growth
+  const hp = 60 + bossNumber * 50 + Math.floor(Math.pow(bossNumber, 2.0) * 18);
+  const bossSpd = 0.08 + bossNumber * 0.012;
+  const bossSc = Math.min(5.0, 2.8 + bossNumber * 0.25);
+  const bossSize = Math.floor(16 * (bossSc / 3));
+  const boss = {
+    x: 40 + Math.random() * (W - 80), y: -40, vx: 0, vy: bossSpd,
+    hp, mhp: hp, size: bossSize, tier: -1, seed: Math.random() * 100, flash: 0,
+    boss: true, bossType: bType, bossNumber, bossSc,
+    phase: 0, phaseTimer: 0, minionTimer: 0,
+    teleportTimer: 0, visible: true,
+    splitPhase: 0,
+  };
+  if (bType === 'hydra') {
+    boss.heads = [{ hp: Math.ceil(hp / 3), mhp: Math.ceil(hp / 3) }, { hp: Math.ceil(hp / 3), mhp: Math.ceil(hp / 3) }, { hp: Math.ceil(hp / 3), mhp: Math.ceil(hp / 3) }];
+    boss.hp = boss.heads.reduce((s, h) => s + h.hp, 0);
+    boss.mhp = boss.hp;
+  }
+  enemies.push(boss);
+  bossAlive = boss;
+  bossSpawned = true;
+  sfx('bossWarn');
+  waveAnnounce = 80;
+  waveAnnounceTxt = `BOSS INCOMING!`;
+  floats.push({ t: bType.toUpperCase() + '!', x: W / 2, y: H / 2 - 30, life: 80, col: C.red2 });
+}
+
+// ── Spawn normal enemies ──
 function spawnWaveEnemy() {
   const d = diff();
   let tier, x, y, vx, vy, hp, spd;
-
-  // First spawn of each wave is the BOSS
-  if (waveSpawnCount === 0) {
-    const bossNumber = waveNum; // every wave = boss
-    const bossTypes = ['golem', 'wraith', 'divider', 'hydra'];
-    const bossIdx = (bossNumber - 1) % bossTypes.length;
-    const bType = bossTypes[bossIdx];
-    // BRUTAL HP: exponential growth — bosses are the real threat
-    hp = 60 + bossNumber * 50 + Math.floor(Math.pow(bossNumber, 2.0) * 18);
-    const bossSpd = 0.08 + bossNumber * 0.012;
-    const bossSc = Math.min(5.0, 2.8 + bossNumber * 0.25);
-    const bossSize = Math.floor(16 * (bossSc / 3));
-    const boss = {
-      x: 40 + Math.random() * (W - 80), y: -40, vx: 0, vy: bossSpd,
-      hp, mhp: hp, size: bossSize, tier: -1, seed: Math.random() * 100, flash: 0,
-      boss: true, bossType: bType, bossNumber, bossSc,
-      phase: 0, phaseTimer: 0, minionTimer: 0,
-      teleportTimer: 0, visible: true,
-      splitPhase: 0,
-    };
-    if (bType === 'hydra') {
-      boss.heads = [{ hp: Math.ceil(hp / 3), mhp: Math.ceil(hp / 3) }, { hp: Math.ceil(hp / 3), mhp: Math.ceil(hp / 3) }, { hp: Math.ceil(hp / 3), mhp: Math.ceil(hp / 3) }];
-      boss.hp = boss.heads.reduce((s, h) => s + h.hp, 0);
-      boss.mhp = boss.hp;
-    }
-    enemies.push(boss);
-    bossAlive = boss;
-    return;
-  }
 
   const ws = waveStats();
   tier = tierForWave();
@@ -1259,20 +1261,23 @@ function update(now) {
       const maxSpawns = getWaveSpawnCount();
       waveTimer += dt;
       if (waveSpawnCount < maxSpawns && waveTimer >= getWaveSpawnDelay()) {
-        waveTimer = 0; waveSpawnCount++;
-        spawnWaveEnemy();
+        waveTimer = 0;
+        spawnWaveEnemy(); // uses waveSpawnCount BEFORE increment
+        waveSpawnCount++;
       }
-      if (waveSpawnCount >= maxSpawns) {
+      if (waveSpawnCount >= maxSpawns && !bossSpawned) {
+        // All normal enemies spawned → now spawn the BOSS
+        spawnBoss();
+      }
+      if (bossSpawned && waveSpawnCount >= maxSpawns) {
         // Wave clear: all enemies (including boss) dead
         const waveEnemiesLeft = enemies.length > 0;
         if (!waveEnemiesLeft) {
           waveActive = false; wavePause = true;
           wavePauseTimer = waveStats().pauseTime;
-          {
-            const bonus = 150 * waveNum;
-            score += bonus;
-            floats.push({ t: `WAVE ${waveNum} CLEAR +${bonus}`, x: W / 2, y: 60, life: 70, col: C.cyan });
-          }
+          const bonus = 150 * waveNum;
+          score += bonus;
+          floats.push({ t: `WAVE ${waveNum} CLEAR +${bonus}`, x: W / 2, y: 60, life: 70, col: C.cyan });
         }
       }
     }
