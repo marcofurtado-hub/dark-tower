@@ -128,8 +128,8 @@ function waveStats() {
   const maxTier = w <= 2 ? 0 : w <= 3 ? 1 : w <= 5 ? 2 : w <= 8 ? 3 : w <= 12 ? 5 : 7;
   // Flank chance: flankers come early and often
   const flankChance = Math.min(0.6, 0.05 + w * 0.04);
-  // Enemy homing strength: they seek the tower more aggressively each wave
-  const homingStr = Math.min(0.012, 0.004 + w * 0.0005);
+  // Enemy homing strength: they seek the tower aggressively
+  const homingStr = Math.min(0.02, 0.006 + w * 0.001);
   // Phase label
   let phase;
   if (w <= 2) phase = 'EASY TARGETS';
@@ -904,7 +904,7 @@ function startGame() {
   tower.angle = -PI / 2;
   beamOn = false; beamT = 0; beamCD = 0;
   bullets = []; enemies = []; crates = []; particles = []; floats = []; trails = [];
-  homingMissiles = [];
+  homingMissiles = []; bossProjectiles = [];
   trauma = 0; freeze = 0;
   waveNum = 0; waveType = ''; waveTimer = 0; waveSpawnCount = 0;
   waveActive = false; wavePause = true; wavePauseTimer = 3000;
@@ -1004,17 +1004,23 @@ function spawnWaveEnemy() {
   spd = ws.speed * (0.85 + Math.random() * 0.3);
   hp = ws.hp + Math.floor(tier * 0.5);
 
-  // Spawn directions: mostly top early, more flankers later
+  // Spawn directions: enemies push DEEP into the screen
   const r = Math.random();
-  if (r < (0.7 - ws.flankChance)) {
-    x = 20 + Math.random() * (W - 40); y = -15;
-    vx = (Math.random() - 0.5) * spd * 0.2; vy = spd * (0.4 + Math.random() * 0.4);
-  } else if (r < 0.85) {
-    x = -15; y = 20 + Math.random() * H * 0.35;
-    vx = spd * 0.7; vy = spd * 0.15;
+  const baseVy = 0.3 + spd * 1.5; // much faster vertical push
+  if (r < (0.65 - ws.flankChance)) {
+    // Top — varied starting heights, some already on screen
+    x = 15 + Math.random() * (W - 30);
+    y = -10 + Math.random() * (GND * 0.15); // some spawn already on screen
+    vx = (Math.random() - 0.5) * spd * 0.4;
+    vy = baseVy * (0.6 + Math.random() * 0.5);
+  } else if (r < 0.82) {
+    // Left flank — deeper into screen
+    x = -10; y = 30 + Math.random() * H * 0.5;
+    vx = spd * 1.2 + 0.3; vy = baseVy * 0.4;
   } else {
-    x = W + 15; y = 20 + Math.random() * H * 0.35;
-    vx = -spd * 0.7; vy = spd * 0.15;
+    // Right flank
+    x = W + 10; y = 30 + Math.random() * H * 0.5;
+    vx = -(spd * 1.2 + 0.3); vy = baseVy * 0.4;
   }
 
   const enScale = ws.enScale;
@@ -1230,12 +1236,13 @@ function update(now) {
     if (state === 'paused') lastT = now; // prevent time jump on unpause
     return;
   }
+  freeze = Math.min(freeze, 6); // cap freeze frames
   if (freeze > 0) { freeze--; return; }
   time += dt / 1000;
   score = Math.max(score, Math.floor(time * 10));
-  trauma = Math.max(0, trauma - dt * 0.001);
-  const s = trauma * trauma;
-  shX = (Math.random() * 2 - 1) * s * 12; shY = (Math.random() * 2 - 1) * s * 12;
+  trauma = Math.min(1.0, Math.max(0, trauma - dt * 0.003)); // cap at 1.0, faster decay
+  const s = Math.min(0.6, trauma * trauma); // cap shake intensity
+  shX = (Math.random() * 2 - 1) * s * 8; shY = (Math.random() * 2 - 1) * s * 8;
 
   // Combo decay
   if (comboTimer > 0) { comboTimer--; if (comboTimer <= 0) { comboCount = 0; comboMult = 1; } }
@@ -1302,6 +1309,28 @@ function update(now) {
 
   // Homing
   updateHoming(dt);
+
+  // ── Boss projectiles ──
+  for (let i = bossProjectiles.length - 1; i >= 0; i--) {
+    const bp = bossProjectiles[i];
+    bp.x += bp.vx; bp.y += bp.vy; bp.life--;
+    if (bp.life <= 0 || bp.x < -20 || bp.x > W + 20 || bp.y > H + 20 || bp.y < -20) {
+      bossProjectiles.splice(i, 1); continue;
+    }
+    // Hit city/ground
+    if (bp.y > GND - 5) {
+      damageCity(bp.x); sfx('cityHit');
+      if (powerupType === 'SHIELD' && shieldHP > 0) { shieldHP--; }
+      else { cityHP--; }
+      trauma += 0.08;
+      for (let p = 0; p < 4; p++) particles.push({ x: bp.x, y: bp.y, vx: (Math.random()-0.5)*3, vy: -Math.random()*2, life: 12, ml: 12, sz: 2, col: bp.col });
+      bossProjectiles.splice(i, 1);
+      if (cityHP <= 0) { cityHP = 0; state = 'gameover'; gameOverTimer = 0; sfx('gameOver'); stopMusic(); }
+      continue;
+    }
+    // Trail
+    if (Math.random() > 0.6) trails.push({ x: bp.x, y: bp.y, life: 6, ml: 6, col: bp.col });
+  }
 
   // ── Bullets ──
   for (let i = bullets.length - 1; i >= 0; i--) {
@@ -1390,7 +1419,7 @@ function update(now) {
           e.shieldHP -= dmg; e.flash = 3;
           if (e.shieldHP <= 0) { e.shielded = false; floats.push({ t: 'SHIELD DOWN', x: e.x, y: e.y - 16, life: 25, col: C.cyan }); }
         } else {
-          e.hp -= dmg; e.flash = 3; trauma += 0.03;
+          e.hp -= dmg; e.flash = 3; trauma += 0.01;
           sfx('hit');
           particles.push({ x: e.x, y: e.y, vx: (Math.random() - 0.5) * 3, vy: -Math.random() * 3, life: 8, ml: 8, sz: 2, col: C.red });
           if (e.hp <= 0) { killEnemy(i); break; }
@@ -1413,49 +1442,116 @@ function update(now) {
   for (let i = floats.length - 1; i >= 0; i--) { floats[i].y -= 0.8; floats[i].life--; if (floats[i].life <= 0) floats.splice(i, 1); }
 }
 
-// ── Boss AI ──
+// ── Boss projectiles ──
+let bossProjectiles = [];
+function spawnBossProj(x, y, vx, vy, col, dmg, sz) {
+  bossProjectiles.push({ x, y, vx, vy, col: col || C.red, life: 300, dmg: dmg || 1, sz: sz || 3 });
+}
+
+// ── Boss AI — each boss has unique aggressive attacks ──
 function updateBoss(e, idx, dt) {
   e.phaseTimer += dt;
+  if (!e.attackTimer) e.attackTimer = 0;
+  e.attackTimer += dt;
 
   if (e.bossType === 'golem') {
-    // Slow descent, spawns minions
-    e.y += 0.12;
-    e.x += Math.sin(Date.now() * 0.0008) * 0.3;
+    // GOLEM: Stomps down, throws boulders in arc, spawns minions
+    e.y += 0.25 + e.bossNumber * 0.02;
+    e.x += Math.sin(Date.now() * 0.0008) * 0.5;
+    // BOULDER THROW: arcing projectiles toward tower
+    if (e.attackTimer > 1800) {
+      e.attackTimer = 0;
+      const ang = Math.atan2(tower.y - e.y, tower.x - e.x);
+      for (let i = -1; i <= 1; i++) {
+        const a = ang + i * 0.25;
+        spawnBossProj(e.x, e.y, Math.cos(a) * 1.8, Math.sin(a) * 1.8, '#a08060', 1, 4);
+      }
+      sfx('explode');
+    }
+    // Spawn minions
     e.minionTimer += dt;
-    if (e.minionTimer > 3000 && enemies.length < 20) {
+    if (e.minionTimer > 3500 && enemies.length < 30) {
       e.minionTimer = 0;
-      for (let m = 0; m < 2; m++) {
+      for (let m = 0; m < 3; m++) {
+        const spread = (m - 1) * 25;
         enemies.push({
-          x: e.x + (m === 0 ? -20 : 20), y: e.y + 10,
-          vx: (m === 0 ? -0.5 : 0.5), vy: 0.4,
+          x: e.x + spread, y: e.y + 15,
+          vx: spread * 0.03, vy: 0.5 + Math.random() * 0.3,
           hp: 2, mhp: 2, size: 6, tier: 0, seed: Math.random() * 100, flash: 0, boss: false, mini: true, enScale: 1.5,
         });
       }
     }
   } else if (e.bossType === 'wraith') {
-    e.y += 0.08;
-    e.x += Math.sin(Date.now() * 0.002) * 0.8;
+    // WRAITH: Teleports, fires homing soul bolts, creates shadow clones
+    e.y += 0.15 + e.bossNumber * 0.01;
+    e.x += Math.sin(Date.now() * 0.003) * 1.2;
+    // SOUL BOLT: aimed at tower every 1.5s
+    if (e.attackTimer > 1500 && e.visible) {
+      e.attackTimer = 0;
+      const ang = Math.atan2(tower.y - e.y, tower.x - e.x);
+      spawnBossProj(e.x, e.y, Math.cos(ang) * 2.5, Math.sin(ang) * 2.5, C.purple, 1, 3);
+      // Scatter bolts
+      spawnBossProj(e.x, e.y, Math.cos(ang + 0.4) * 1.5, Math.sin(ang + 0.4) * 1.5, '#6030a0', 1, 2);
+      spawnBossProj(e.x, e.y, Math.cos(ang - 0.4) * 1.5, Math.sin(ang - 0.4) * 1.5, '#6030a0', 1, 2);
+    }
+    // Teleport + shadow clone
     e.teleportTimer += dt;
-    if (e.teleportTimer > 4000) {
+    if (e.teleportTimer > 3000) {
       e.teleportTimer = 0;
-      e.visible = !e.visible;
-      if (!e.visible) {
-        for (let p = 0; p < 8; p++) particles.push({ x: e.x, y: e.y, vx: (Math.random() - 0.5) * 4, vy: (Math.random() - 0.5) * 4, life: 15, ml: 15, sz: 2, col: C.purple });
-        setTimeout(() => {
-          e.x = 40 + Math.random() * (W - 80);
-          e.y = Math.max(20, e.y - 40 + Math.random() * 30);
-          e.visible = true;
-          for (let p = 0; p < 8; p++) particles.push({ x: e.x, y: e.y, vx: (Math.random() - 0.5) * 4, vy: (Math.random() - 0.5) * 4, life: 15, ml: 15, sz: 2, col: C.purple });
-        }, 800);
-      }
+      for (let p = 0; p < 10; p++) particles.push({ x: e.x, y: e.y, vx: (Math.random() - 0.5) * 5, vy: (Math.random() - 0.5) * 5, life: 15, ml: 15, sz: 2, col: C.purple });
+      e.visible = false;
+      const oldX = e.x, oldY = e.y;
+      setTimeout(() => {
+        e.x = 30 + Math.random() * (W - 60);
+        e.y = Math.min(e.y, GND * 0.5) + Math.random() * 30;
+        e.visible = true;
+        for (let p = 0; p < 10; p++) particles.push({ x: e.x, y: e.y, vx: (Math.random() - 0.5) * 5, vy: (Math.random() - 0.5) * 5, life: 15, ml: 15, sz: 2, col: C.purple });
+        // Shadow clone (fake enemy)
+        if (enemies.length < 25) {
+          enemies.push({
+            x: oldX, y: oldY, vx: (Math.random() - 0.5) * 0.5, vy: 0.4,
+            hp: 3, mhp: 3, size: 8, tier: 3, seed: Math.random() * 100, flash: 0, boss: false, mini: true, enScale: 2,
+          });
+        }
+      }, 600);
     }
   } else if (e.bossType === 'divider') {
-    const spd = 0.08 + (e.splitPhase || 0) * 0.04;
+    // DIVIDER: Zigzag descent, fires spread shots, charges at tower
+    const spd = 0.2 + (e.splitPhase || 0) * 0.08;
     e.y += spd;
-    e.x += Math.sin(Date.now() * 0.0015 + e.seed) * (0.4 + (e.splitPhase || 0) * 0.3);
+    e.x += Math.sin(Date.now() * 0.002 + e.seed) * (0.8 + (e.splitPhase || 0) * 0.5);
+    // SPREAD SHOT: ring of projectiles
+    if (e.attackTimer > 2200) {
+      e.attackTimer = 0;
+      const numProj = 5 + (e.splitPhase || 0) * 2;
+      for (let i = 0; i < numProj; i++) {
+        const a = (PI * 2 / numProj) * i;
+        spawnBossProj(e.x, e.y, Math.cos(a) * 1.2, Math.sin(a) * 1.2, '#e08040', 1, 3);
+      }
+      sfx('explode');
+    }
   } else if (e.bossType === 'hydra') {
-    e.y += 0.1;
-    e.x += Math.sin(Date.now() * 0.001) * 0.5;
+    // HYDRA: 3 heads each spit acid streams, regenerates slowly
+    e.y += 0.2 + e.bossNumber * 0.01;
+    e.x += Math.sin(Date.now() * 0.0015) * 0.6;
+    // ACID SPIT: each living head fires at tower
+    if (e.attackTimer > 1200 && e.heads) {
+      e.attackTimer = 0;
+      for (let h = 0; h < 3; h++) {
+        if (e.heads[h].hp <= 0) continue;
+        const headX = e.x + (h - 1) * 18;
+        const ang = Math.atan2(tower.y - e.y, tower.x - headX) + (Math.random() - 0.5) * 0.3;
+        spawnBossProj(headX, e.y + 5, Math.cos(ang) * 2, Math.sin(ang) * 2, '#40e060', 1, 3);
+      }
+    }
+    // Slow HP regen for living heads
+    if (e.phaseTimer > 5000 && e.heads) {
+      e.phaseTimer = 0;
+      for (const h of e.heads) {
+        if (h.hp > 0 && h.hp < h.mhp) { h.hp = Math.min(h.mhp, h.hp + 2); }
+      }
+      e.hp = e.heads.reduce((s, h) => s + h.hp, 0);
+    }
   }
 
   // Boss hits city
@@ -1666,6 +1762,16 @@ function drawBullets() {
   for (const m of homingMissiles) {
     g.fillStyle = C.green;
     g.fillRect(Math.floor(m.x) - 2, Math.floor(m.y) - 2, 4, 4);
+  }
+  // Boss projectiles
+  for (const bp of bossProjectiles) {
+    g.fillStyle = bp.col;
+    const s = bp.sz || 3;
+    g.fillRect(Math.floor(bp.x) - Math.floor(s/2), Math.floor(bp.y) - Math.floor(s/2), s, s);
+    // Glow
+    g.globalAlpha = 0.3;
+    g.fillRect(Math.floor(bp.x) - s, Math.floor(bp.y) - s, s * 2, s * 2);
+    g.globalAlpha = 1;
   }
 }
 
@@ -2105,7 +2211,8 @@ function render() {
   g.restore();
 
   if (trauma > 0.25 && state === 'play') {
-    g.fillStyle = `rgba(160,48,32,${(trauma - 0.25) * 0.3})`;
+    const redAlpha = Math.min(0.18, (trauma - 0.25) * 0.2); // capped so screen never goes full red
+    g.fillStyle = `rgba(160,48,32,${redAlpha})`;
     g.fillRect(0, 0, W, H);
   }
 
