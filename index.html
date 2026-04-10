@@ -69,14 +69,14 @@ addEventListener('resize', resize);
 addEventListener('orientationchange', () => setTimeout(resize, 250));
 resize();
 
-// ── Palette ──
+// ── Palette (DOOM-inspired: dark, bloody, gritty) ──
 const C = {
-  bg: '#0a0a0f', dark: '#14141c', mid: '#2a2a35',
-  light: '#8888a0', bone: '#c8c0b0', white: '#e8e0d0',
-  red: '#a03020', red2: '#d04830',
-  gold: '#e8c020', gold2: '#ffd840',
-  cyan: '#40c8e0', green: '#40c040',
-  purple: '#a040d0', blue: '#3060d0',
+  bg: '#080408', dark: '#100810', mid: '#251518',
+  light: '#806060', bone: '#b8a898', white: '#d8c8b8',
+  red: '#b02010', red2: '#e03818',
+  gold: '#c8a010', gold2: '#e8c020',
+  cyan: '#30a0b0', green: '#308828',
+  purple: '#802898', blue: '#283898',
 };
 
 // ── Ground ──
@@ -144,27 +144,23 @@ function waveStats() {
 
 function nextWave() {
   waveNum++;
-  waveType = (waveNum % 5 === 0) ? 'BOSS' : 'NORMAL';
+  // EVERY wave has a boss! Plus normal enemies from wave 2+
+  waveType = 'BOSS';
   waveActive = true;
   waveSpawnCount = 0;
-  waveAnnounce = 120;
-  if (waveType === 'BOSS') {
-    waveAnnounceTxt = `WAVE ${waveNum}: BOSS INCOMING`;
-    sfx('bossWarn');
-  } else {
-    const ws = waveStats();
-    waveAnnounceTxt = `WAVE ${waveNum}: ${ws.phase}`;
-    sfx('waveStart');
-  }
+  waveAnnounce = 100;
+  const ws = waveStats();
+  waveAnnounceTxt = `WAVE ${waveNum}: ${ws.phase}`;
+  sfx('bossWarn');
+  sfx('waveStart');
 }
 
 function getWaveSpawnCount() {
-  if (waveType === 'BOSS') return 1;
-  return waveStats().count;
+  // Boss + normal enemies: 1 boss + wave enemies
+  return 1 + (waveNum >= 2 ? waveStats().count : 0);
 }
 
 function getWaveSpawnDelay() {
-  if (waveType === 'BOSS') return 100;
   return waveStats().spawnDelay;
 }
 
@@ -172,7 +168,7 @@ function getWaveSpawnDelay() {
 //  AUDIO - Web Audio API
 // ══════════════════════
 let audioCtx = null, masterGain = null, musicGain = null;
-let muted = false, volume = 0.5;
+let muted = false, volume = 0.5, sfxVol = 0.5, musicVol = 0.45;
 let musicPlaying = false, musicInterval = null;
 
 function initAudio() {
@@ -182,7 +178,7 @@ function initAudio() {
   masterGain.gain.value = volume;
   masterGain.connect(audioCtx.destination);
   musicGain = audioCtx.createGain();
-  musicGain.gain.value = 0.15;
+  musicGain.gain.value = 0.45; // LOUD — DOOM style
   musicGain.connect(masterGain);
 }
 
@@ -286,118 +282,98 @@ function sfx(name) {
   }
 }
 
-// ══════════════════════════════════════
-//  MUSIC — 1-minute 8-bit chip-tune loop
-//  4 channels: melody, bass, arpeggio, drums
-//  Sections: intro(8) → verse(16) → chorus(16) → verse2(16) → bridge(8) → chorus2(16) → outro(8)
-// ══════════════════════════════════════
+// ══════════════════════════════════════════════
+//  MUSIC — DOOM-style 8-bit metal loop (~1 min)
+//  Heavy E-minor riffs, power chords, aggressive drums
+//  4ch: lead (sawtooth), bass (square+detune), power chord, drums
+// ══════════════════════════════════════════════
 let musicStep = 0;
-const BPM = 140;
-const STEP_MS = Math.round(60000 / BPM / 2); // 16th-note ≈ 214ms
+const BPM = 155; // fast & aggressive
+const STEP_MS = Math.round(60000 / BPM / 2);
 
-// Note helper: name → frequency
+// Note helper
 const NT = (() => {
   const names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
   const map = {};
   for (let oct = 1; oct <= 7; oct++)
     for (let i = 0; i < 12; i++)
       map[names[i] + oct] = 440 * Math.pow(2, (i - 9 + (oct - 4) * 12) / 12);
-  map['R'] = 0; // rest
+  map['R'] = 0;
   return map;
 })();
 
-// ── Song data: 88 steps (~1 min at 140 BPM) ──
-// Melody (square wave, lead)
+let sfxGain = null;
+function initSfxGain() {
+  if (sfxGain || !audioCtx) return;
+  sfxGain = audioCtx.createGain();
+  sfxGain.gain.value = 0.5;
+  sfxGain.connect(masterGain);
+}
+
+// ── DOOM riff — 96 steps (~1 min at 155BPM) ──
+// Lead: aggressive sawtooth melody, E minor / diminished
 const M_MEL = [
-  // INTRO (8 steps) — rising arpeggio
-  'A3','C4','E4','A4','R','A4','G4','E4',
-  // VERSE 1 (16 steps) — catchy minor melody
-  'A4','R','C5','A4','G4','R','E4','G4',
-  'A4','R','C5','D5','E5','R','D5','C5',
-  // CHORUS (16 steps) — soaring, energetic
-  'E5','E5','R','D5','C5','R','A4','C5',
-  'D5','D5','R','C5','A4','R','G4','A4',
-  // VERSE 2 (16 steps) — variation with runs
-  'A4','C5','E5','C5','A4','R','G4','A4',
-  'C5','E5','G5','E5','D5','C5','A4','R',
-  // BRIDGE (8 steps) — tension builder
-  'F5','E5','D5','C5','D5','E5','F5','E5',
-  // CHORUS 2 (16 steps) — climactic
-  'A5','R','G5','E5','R','C5','E5','G5',
-  'A5','G5','E5','C5','D5','E5','A4','R',
-  // OUTRO (8 steps) — wind down
-  'E5','D5','C5','A4','G4','E4','A3','R',
+  // INTRO RIFF (16) — iconic descending power riff
+  'E4','E4','R','E4','D4','R','C4','R','B3','B3','R','C4','D4','R','E4','R',
+  // VERSE RIFF (16) — chugging with stabs
+  'E3','R','E3','E3','G3','R','A3','R','B3','R','B3','A3','G3','R','E3','R',
+  // PRE-CHORUS (16) — tension build
+  'C4','R','D4','C4','B3','R','A3','B3','C4','D4','E4','R','D4','C4','B3','R',
+  // CHORUS (16) — soaring aggressive lead
+  'E5','R','D5','E5','G5','R','E5','D5','C5','R','B4','C5','D5','R','E5','R',
+  // BREAKDOWN (16) — palm-mute feel, low stabs
+  'E3','R','R','E3','R','R','E3','E3','F3','R','R','F3','R','R','E3','R',
+  // CHORUS 2 (16) — climax with octave jumps
+  'E5','E4','D5','E5','G5','E4','E5','D5','B4','B3','C5','D5','E5','G5','E5','R',
 ];
 
-// Bass (triangle wave)
+// Bass: heavy low-end power chords (square + detune for grit)
 const M_BASS = [
   // INTRO
-  'A2','A2','A2','A2','E2','E2','E2','E2',
-  // VERSE 1
-  'A2','A2','A2','A2','C3','C3','C3','C3',
-  'F2','F2','F2','F2','G2','G2','G2','G2',
+  'E2','E2','E2','E2','D2','D2','C2','C2','B1','B1','B1','C2','D2','D2','E2','E2',
+  // VERSE
+  'E2','E2','E2','E2','G2','G2','A2','A2','B2','B2','B2','A2','G2','G2','E2','E2',
+  // PRE-CHORUS
+  'C2','C2','D2','D2','B1','B1','A1','A1','C2','C2','E2','E2','D2','D2','B1','B1',
   // CHORUS
-  'A2','A2','E2','E2','F2','F2','C3','C3',
-  'D3','D3','A2','A2','E2','E2','A2','A2',
-  // VERSE 2
-  'A2','A2','C3','C3','F2','F2','G2','G2',
-  'A2','A2','E2','E2','F2','F2','G2','G2',
-  // BRIDGE
-  'F2','F2','G2','G2','A2','A2','E2','E2',
+  'E2','E2','D2','D2','G2','G2','E2','E2','C2','C2','B1','B1','D2','D2','E2','E2',
+  // BREAKDOWN
+  'E1','E1','E1','E1','E1','E1','E1','E1','F1','F1','F1','F1','F1','F1','E1','E1',
   // CHORUS 2
-  'A2','A2','E2','E2','F2','F2','C3','C3',
-  'A2','A2','G2','G2','F2','F2','E2','E2',
-  // OUTRO
-  'A2','A2','E2','E2','F2','F2','A2','A2',
+  'E2','E2','D2','D2','G2','G2','E2','E2','B1','B1','C2','C2','E2','E2','E2','E2',
 ];
 
-// Arpeggio channel (square wave, soft — adds shimmer)
-const M_ARP = [
+// Power chord stabs (square, adds 5th above bass for thickness)
+const M_PWR = [
   // INTRO
-  'A3','C4','E4','A3','C4','E4','A3','E4',
-  // VERSE 1
-  'A3','E4','A3','C4','E4','C4','E4','G4',
-  'F3','A3','C4','F3','G3','B3','D4','G3',
+  'B3','B3','R','B3','A3','R','G3','R','F#3','F#3','R','G3','A3','R','B3','R',
+  // VERSE
+  'B2','R','B2','B2','D3','R','E3','R','F#3','R','F#3','E3','D3','R','B2','R',
+  // PRE-CHORUS
+  'G3','R','A3','G3','F#3','R','E3','F#3','G3','A3','B3','R','A3','G3','F#3','R',
   // CHORUS
-  'A3','C4','E4','A3','F3','A3','C4','F3',
-  'D3','F3','A3','D3','E3','G3','B3','E3',
-  // VERSE 2
-  'A3','E4','C4','A3','F3','C4','A3','F3',
-  'A3','C4','E4','G4','F3','A3','D4','F3',
-  // BRIDGE
-  'F3','A3','C4','F3','G3','B3','D4','G3',
+  'B4','R','A4','B4','D5','R','B4','A4','G4','R','F#4','G4','A4','R','B4','R',
+  // BREAKDOWN
+  'B2','R','R','B2','R','R','B2','B2','C3','R','R','C3','R','R','B2','R',
   // CHORUS 2
-  'A3','C4','E4','A4','F3','A3','C4','F4',
-  'A3','E4','C4','A3','F3','D4','A3','E3',
-  // OUTRO
-  'A3','C4','E4','A3','E3','G3','A3','R',
+  'B4','B3','A4','B4','D5','B3','B4','A4','F#4','F#3','G4','A4','B4','D5','B4','R',
 ];
 
-// Drum patterns: K=kick, S=snare, H=hihat, R=rest
+// Drums: K=kick, S=snare, H=hat, C=crash, T=double-kick, R=rest
 const M_DRUM = [
-  // INTRO (8) — builds up
-  'H','R','H','R','K','H','S','H',
-  // VERSE 1 (16) — standard beat
-  'K','H','S','H','K','H','S','H',
-  'K','H','S','H','K','K','S','H',
-  // CHORUS (16) — driving
-  'K','H','S','K','H','K','S','H',
-  'K','K','S','H','K','H','S','S',
-  // VERSE 2 (16) — groove
-  'K','H','S','H','K','H','S','H',
-  'K','H','S','K','K','H','S','H',
-  // BRIDGE (8) — breakdown
-  'K','R','S','R','K','R','S','K',
-  // CHORUS 2 (16) — intense
-  'K','K','S','H','K','K','S','H',
-  'K','K','S','K','S','K','S','S',
-  // OUTRO (8) — fade
-  'K','H','S','H','K','R','S','R',
+  // INTRO (16) — driving metal beat
+  'C','H','S','H','K','H','S','T','K','H','S','H','K','T','S','H',
+  // VERSE (16) — double kick pattern
+  'K','H','S','T','K','H','S','H','T','H','S','T','K','H','S','K',
+  // PRE-CHORUS (16) — building intensity
+  'K','K','S','H','K','K','S','H','K','K','S','K','T','T','S','H',
+  // CHORUS (16) — full blast
+  'C','T','S','K','T','K','S','T','K','T','S','K','T','T','S','C',
+  // BREAKDOWN (16) — half-time stomp
+  'K','R','R','S','R','R','K','K','K','R','R','S','R','R','K','S',
+  // CHORUS 2 (16) — double-time blast
+  'C','T','S','T','K','T','S','T','T','K','S','T','K','T','S','C',
 ];
-
-// Boss overlay: darker bass notes, replace melody
-const BOSS_MEL = ['E4','R','E4','D4','C4','R','B3','C4','D4','R','D4','C4','B3','R','A3','R'];
-const BOSS_BASS_N = ['A1','A1','A1','A1','E1','E1','E1','E1','F1','F1','F1','F1','E1','E1','E1','E1'];
 
 function playMusicNote(freq, dur, type, vol, detune2) {
   if (!freq || freq === 0 || muted || !audioCtx) return;
@@ -415,69 +391,65 @@ function playMusicNote(freq, dur, type, vol, detune2) {
 function playDrum(type) {
   if (muted || !audioCtx) return;
   const t = audioCtx.currentTime;
-  if (type === 'K') {
-    // Kick: short low punch
+  if (type === 'K' || type === 'T') {
+    // Heavy kick / double kick
     const o = audioCtx.createOscillator();
     const gn = audioCtx.createGain();
-    o.type = 'sine'; o.frequency.setValueAtTime(150, t);
-    o.frequency.exponentialRampToValueAtTime(30, t + 0.1);
-    gn.gain.setValueAtTime(0.06, t);
+    o.type = 'sine'; o.frequency.setValueAtTime(type === 'T' ? 180 : 140, t);
+    o.frequency.exponentialRampToValueAtTime(25, t + 0.1);
+    gn.gain.setValueAtTime(0.09, t);
     gn.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
     o.connect(gn); gn.connect(musicGain);
     o.start(t); o.stop(t + 0.12);
+    // Sub-bass thump for weight
+    playMusicNote(40, 0.08, 'sine', 0.04);
   } else if (type === 'S') {
-    // Snare: noise burst + tone
-    playNoise(0.08, 0.04, musicGain);
-    playMusicNote(200, 0.06, 'square', 0.02);
+    // Aggressive snare
+    playNoise(0.1, 0.06, musicGain);
+    playMusicNote(180, 0.05, 'square', 0.03);
   } else if (type === 'H') {
-    // Hi-hat: very short noise
-    playNoise(0.03, 0.02, musicGain);
+    // Tight hi-hat
+    playNoise(0.025, 0.025, musicGain);
+  } else if (type === 'C') {
+    // Crash cymbal
+    playNoise(0.3, 0.06, musicGain);
+    playMusicNote(300, 0.15, 'square', 0.01);
   }
 }
 
 function startMusic() {
   if (musicPlaying || !audioCtx) return;
+  initSfxGain();
   musicPlaying = true;
   musicStep = 0;
   musicInterval = setInterval(() => {
-    if (muted || state !== 'play') return;
-    const totalSteps = M_MEL.length; // 88 steps
+    if (muted || (state !== 'play' && state !== 'paused')) return;
+    const totalSteps = M_MEL.length; // 96 steps
     const idx = musicStep % totalSteps;
-    const isBoss = bossAlive != null;
     const stepDur = STEP_MS / 1000;
 
-    // ── Melody ──
-    if (isBoss) {
-      const bIdx = musicStep % BOSS_MEL.length;
-      const mf = NT[BOSS_MEL[bIdx]];
-      if (mf) playMusicNote(mf, stepDur * 0.85, 'square', 0.03);
-    } else {
-      const mf = NT[M_MEL[idx]];
-      if (mf) playMusicNote(mf, stepDur * 0.8, 'square', 0.03);
+    // ── Lead melody (sawtooth for gritty DOOM feel) ──
+    const mf = NT[M_MEL[idx]];
+    if (mf) {
+      playMusicNote(mf, stepDur * 0.7, 'sawtooth', 0.04);
+      // Slight octave double for thickness
+      playMusicNote(mf * 2, stepDur * 0.3, 'square', 0.008, 3);
     }
 
-    // ── Bass ──
-    if (isBoss) {
-      const bIdx = musicStep % BOSS_BASS_N.length;
-      const bf = NT[BOSS_BASS_N[bIdx]];
-      if (bf) playMusicNote(bf, stepDur * 0.9, 'triangle', 0.045);
-    } else {
-      const bf = NT[M_BASS[idx]];
-      if (bf) playMusicNote(bf, stepDur * 0.9, 'triangle', 0.04);
+    // ── Bass (square + detune = dirty power chord) ──
+    const bf = NT[M_BASS[idx]];
+    if (bf) {
+      playMusicNote(bf, stepDur * 0.9, 'square', 0.05);
+      playMusicNote(bf * 1.002, stepDur * 0.9, 'square', 0.03, 8); // detune for grit
     }
 
-    // ── Arpeggio (every other step for shimmer) ──
-    if (!isBoss) {
-      const af = NT[M_ARP[idx]];
-      if (af) playMusicNote(af, stepDur * 0.3, 'square', 0.012, 7);
-    }
+    // ── Power chord channel ──
+    const pf = NT[M_PWR[idx]];
+    if (pf) playMusicNote(pf, stepDur * 0.5, 'sawtooth', 0.02, -5);
 
     // ── Drums ──
     const drumChar = M_DRUM[idx];
     if (drumChar !== 'R') playDrum(drumChar);
-
-    // Boss gets double-time kick on even steps
-    if (isBoss && musicStep % 2 === 0) playDrum('K');
 
     musicStep++;
   }, STEP_MS);
@@ -562,8 +534,40 @@ function drawWeather() {
 
 // ── Input ──
 const keys = {};
+let pauseMenuSel = 0; // 0=resume, 1=sfx vol, 2=music vol, 3=mute
+
+function togglePause() {
+  if (state === 'play') { state = 'paused'; pauseMenuSel = 0; }
+  else if (state === 'paused') { state = 'play'; }
+}
+
 document.addEventListener('keydown', e => {
   keys[e.code] = true;
+
+  // Pause
+  if (e.code === 'Escape' || e.code === 'KeyP') {
+    if (state === 'play' || state === 'paused') { togglePause(); return; }
+  }
+
+  // Pause menu controls
+  if (state === 'paused') {
+    if (e.code === 'ArrowUp' || e.code === 'KeyW') pauseMenuSel = Math.max(0, pauseMenuSel - 1);
+    if (e.code === 'ArrowDown' || e.code === 'KeyS') pauseMenuSel = Math.min(3, pauseMenuSel + 1);
+    if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
+      if (pauseMenuSel === 1) { sfxVol = Math.max(0, sfxVol - 0.1); if (sfxGain) sfxGain.gain.value = sfxVol; }
+      if (pauseMenuSel === 2) { musicVol = Math.max(0, musicVol - 0.05); if (musicGain) musicGain.gain.value = musicVol; }
+    }
+    if (e.code === 'ArrowRight' || e.code === 'KeyD') {
+      if (pauseMenuSel === 1) { sfxVol = Math.min(1, sfxVol + 0.1); if (sfxGain) sfxGain.gain.value = sfxVol; }
+      if (pauseMenuSel === 2) { musicVol = Math.min(1, musicVol + 0.05); if (musicGain) musicGain.gain.value = musicVol; }
+    }
+    if (e.code === 'Enter' || e.code === 'Space') {
+      if (pauseMenuSel === 0) togglePause();
+      if (pauseMenuSel === 3) { muted = !muted; if (muted) stopMusic(); else startMusic(); }
+    }
+    return;
+  }
+
   if (state === 'name') {
     e.preventDefault();
     if (e.code === 'Backspace') nameInput = nameInput.slice(0, -1);
@@ -606,6 +610,27 @@ document.addEventListener('touchstart', e => {
   e.preventDefault();
   if (state === 'menu') { initAudio(); startGame(); return; }
   if (state === 'gameover' && gameOverTimer > 90) { state = 'name'; nameInput = ''; return; }
+  // Pause button: top-right 50x50 area (in screen coords → game coords)
+  const scale = Math.min(scr.width / W, scr.height / H);
+  const ox = (scr.width - W * scale) / 2, oy = (scr.height - H * scale) / 2;
+  const gx = (e.touches[0].clientX - ox) / scale;
+  const gy = (e.touches[0].clientY - oy) / scale;
+  if (state === 'play' && gx > W - 50 && gy < 50) { togglePause(); return; }
+  if (state === 'paused') {
+    // Touch items in pause menu
+    const menuX = W / 2, menuY = H / 2;
+    const items = [menuY - 30, menuY, menuY + 30, menuY + 60];
+    for (let i = 0; i < items.length; i++) {
+      if (Math.abs(gy - items[i]) < 14 && Math.abs(gx - menuX) < 100) {
+        if (i === 0) togglePause();
+        else if (i === 1) { sfxVol = sfxVol >= 0.9 ? 0 : sfxVol + 0.2; if (sfxGain) sfxGain.gain.value = sfxVol; }
+        else if (i === 2) { musicVol = musicVol >= 0.9 ? 0 : musicVol + 0.1; if (musicGain) musicGain.gain.value = musicVol; }
+        else if (i === 3) { muted = !muted; if (muted) stopMusic(); else startMusic(); }
+        return;
+      }
+    }
+    return;
+  }
   touchActive = true;
   if (state === 'play') {
     tower.angle = touchToAngle(e.touches[0].clientX, e.touches[0].clientY);
@@ -750,7 +775,7 @@ const BLDG = [
   // Skyscraper
   ['0041111400','0011111100','0012112100','0011111100','0012112100','0011111100','0012112100','0011111100','0012112100','0011111100','0011311100','1111111111'],
 ];
-const BLDG_COLORS = { '1': C.bone, '2': '#5566aa', '3': '#554433', '4': '#887766' };
+const BLDG_COLORS = { '1': '#6a5848', '2': '#443322', '3': '#382818', '4': '#504030' };
 
 function drawSpr(data, x, y, sc, cols) {
   const cc = cols || { '1': C.bone };
@@ -787,10 +812,10 @@ function drawCity() {
     for (let c = 0; c < s.row.length; c++) {
       if (s.row[c] === '0') continue;
       const ch = s.row[c];
-      // Window glow at night
+      // Window glow — hellfire flicker
       if (ch === '2') {
-        const flicker = Math.sin(Date.now() * 0.001 + b.x + s.y) > -0.3;
-        g.fillStyle = flicker ? '#5566aa' : '#334466';
+        const flicker = Math.sin(Date.now() * 0.002 + b.x + s.y) > -0.3;
+        g.fillStyle = flicker ? '#884422' : '#552211';
       } else {
         g.fillStyle = BLDG_COLORS[ch] || C.bone;
       }
@@ -943,23 +968,24 @@ function spawnWaveEnemy() {
   const d = diff();
   let tier, x, y, vx, vy, hp, spd;
 
-  if (waveType === 'BOSS') {
-    const bossNumber = Math.floor(waveNum / 5); // 1st, 2nd, 3rd boss...
+  // First spawn of each wave is the BOSS
+  if (waveSpawnCount === 0) {
+    const bossNumber = waveNum; // every wave = boss
     const bossTypes = ['golem', 'wraith', 'divider', 'hydra'];
     const bossIdx = (bossNumber - 1) % bossTypes.length;
     const bType = bossTypes[bossIdx];
-    // Progressive HP: each boss MUCH harder — exponential scaling
-    hp = 40 + bossNumber * 40 + Math.floor(Math.pow(bossNumber, 2.2) * 12);
-    const bossSpd = 0.1 + bossNumber * 0.025;
-    const bossSc = Math.min(4.5, 2.5 + bossNumber * 0.3);
+    // BRUTAL HP: exponential growth — bosses are the real threat
+    hp = 60 + bossNumber * 50 + Math.floor(Math.pow(bossNumber, 2.0) * 18);
+    const bossSpd = 0.08 + bossNumber * 0.012;
+    const bossSc = Math.min(5.0, 2.8 + bossNumber * 0.25);
     const bossSize = Math.floor(16 * (bossSc / 3));
     const boss = {
-      x: W / 2, y: -30, vx: 0, vy: bossSpd,
+      x: 40 + Math.random() * (W - 80), y: -40, vx: 0, vy: bossSpd,
       hp, mhp: hp, size: bossSize, tier: -1, seed: Math.random() * 100, flash: 0,
       boss: true, bossType: bType, bossNumber, bossSc,
       phase: 0, phaseTimer: 0, minionTimer: 0,
       teleportTimer: 0, visible: true,
-      splitPhase: 0, // divider: 0=whole, 1=split into 2, 2=each splits into 3
+      splitPhase: 0,
     };
     if (bType === 'hydra') {
       boss.heads = [{ hp: Math.ceil(hp / 3), mhp: Math.ceil(hp / 3) }, { hp: Math.ceil(hp / 3), mhp: Math.ceil(hp / 3) }, { hp: Math.ceil(hp / 3), mhp: Math.ceil(hp / 3) }];
@@ -1197,8 +1223,9 @@ function deactivatePowerup() {
 // ══════════════════════
 function update(now) {
   const dt = now - lastT; lastT = now;
-  if (dt > 100 || state !== 'play') {
+  if (dt > 100 || (state !== 'play')) {
     if (state === 'gameover') gameOverTimer++;
+    if (state === 'paused') lastT = now; // prevent time jump on unpause
     return;
   }
   if (freeze > 0) { freeze--; return; }
@@ -1236,13 +1263,13 @@ function update(now) {
         spawnWaveEnemy();
       }
       if (waveSpawnCount >= maxSpawns) {
-        // Check if all wave enemies dead (or just boss)
-        const waveEnemiesLeft = waveType === 'BOSS' ? enemies.some(en => en.boss) : enemies.length > 0;
+        // Wave clear: all enemies (including boss) dead
+        const waveEnemiesLeft = enemies.length > 0;
         if (!waveEnemiesLeft) {
           waveActive = false; wavePause = true;
           wavePauseTimer = waveStats().pauseTime;
-          if (waveType !== 'BOSS') {
-            const bonus = 100 * waveNum;
+          {
+            const bonus = 150 * waveNum;
             score += bonus;
             floats.push({ t: `WAVE ${waveNum} CLEAR +${bonus}`, x: W / 2, y: 60, life: 70, col: C.cyan });
           }
@@ -1465,13 +1492,18 @@ function updateBoss(e, idx, dt) {
 // ══════════════════════
 function drawBG() {
   g.fillStyle = C.bg; g.fillRect(0, 0, W, H);
-  for (let y = 0; y < GND; y += 10) { g.fillStyle = `rgba(20,20,28,${0.02 + y / GND * 0.06})`; g.fillRect(0, y, W, 10); }
+  // Hellish red gradient at horizon
+  for (let y = 0; y < GND; y += 10) {
+    const p = y / GND;
+    g.fillStyle = `rgba(${Math.floor(18 + p * 15)},${Math.floor(4 + p * 4)},${Math.floor(4 + p * 6)},${0.03 + p * 0.08})`;
+    g.fillRect(0, y, W, 10);
+  }
   for (let layer = 0; layer < 2; layer++) {
     const freq = layer === 0 ? 0.003 : 0.007, amp = layer === 0 ? 50 : 30;
     for (let i = 0; i < W; i += 4) {
       const h = Math.sin(i * freq + layer * 2) * amp + Math.sin(i * freq * 3) * amp * 0.3;
       const top = GND - 80 - h - layer * 20;
-      g.fillStyle = layer === 0 ? '#0e0e16' : '#121220';
+      g.fillStyle = layer === 0 ? '#0c0408' : '#100610';
       g.fillRect(i, top, 4, GND - top);
     }
   }
@@ -1489,8 +1521,10 @@ function drawBG() {
       g.fillRect(Math.floor(px), Math.floor(py), sz, sz);
     }
   }
-  g.fillStyle = C.mid; g.fillRect(0, GND, W, 2);
-  g.fillStyle = C.dark; g.fillRect(0, GND + 2, W, H - GND - 2);
+  g.fillStyle = '#381818'; g.fillRect(0, GND, W, 2);
+  g.fillStyle = '#0c0406'; g.fillRect(0, GND + 2, W, H - GND - 2);
+  // Blood-red ground glow
+  g.fillStyle = 'rgba(80,10,5,0.15)'; g.fillRect(0, GND - 4, W, 8);
 }
 
 function drawTower() {
@@ -1762,6 +1796,12 @@ function drawHUD() {
     g.fillText(weather.toUpperCase(), 8, H - 28);
   }
 
+  // Pause button (visible, top-right)
+  g.fillStyle = 'rgba(40,20,20,0.5)'; g.fillRect(W - 40, 4, 34, 20);
+  g.strokeStyle = C.mid; g.lineWidth = 1; g.strokeRect(W - 40, 4, 34, 20);
+  g.font = `bold 10px ${F}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillStyle = C.bone; g.fillText('II', W - 23, 14);
+
   // Mute indicator
   if (muted) { g.font = `10px ${F}`; g.textAlign = 'right'; g.fillStyle = C.mid; g.fillText('MUTED [M]', W - 8, H - 42); }
 
@@ -1966,7 +2006,7 @@ function drawMenu() {
   const isMob = 'ontouchstart' in window;
   g.fillText(isMob ? 'TOUCH TO AIM \u2014 AUTO FIRE' : '[A/D] AIM   [F] FULLSCREEN   [M] MUTE', W / 2, infoY);
   g.fillText(por ? 'SHOOT CRATES FOR UPGRADES' : 'SHOOT CRATES FOR WEAPON UPGRADES & POWER-UPS', W / 2, infoY + 17);
-  g.fillText(por ? 'ENEMIES SHRINK EACH WAVE \u2014 BOSS EVERY 5' : 'ENEMIES SHRINK & SPEED UP EACH WAVE \u2014 BOSS EVERY 5', W / 2, infoY + 34);
+  g.fillText(por ? 'ENEMIES SHRINK EACH WAVE \u2014 BOSS EVERY WAVE' : 'ENEMIES SHRINK & SPEED UP EACH WAVE \u2014 BOSS EVERY WAVE', W / 2, infoY + 34);
 
   g.font = `${por ? 8 : 10}px ${F}`; g.fillStyle = C.mid;
   if (por) {
@@ -2005,6 +2045,48 @@ function drawMenu() {
 }
 
 // ══════════════════════
+//  PAUSE SCREEN
+// ══════════════════════
+function drawPause() {
+  // Draw game behind with dark overlay
+  drawGameplay();
+  g.fillStyle = 'rgba(0,0,0,0.7)';
+  g.fillRect(0, 0, W, H);
+
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.font = `bold 28px ${F}`; g.fillStyle = C.red2;
+  g.fillText('PAUSED', W / 2, H / 2 - 70);
+
+  const items = [
+    { label: 'RESUME', y: H / 2 - 30 },
+    { label: `SFX VOL: ${Math.round(sfxVol * 100)}%`, y: H / 2 },
+    { label: `MUSIC VOL: ${Math.round(musicVol * 100)}%`, y: H / 2 + 30 },
+    { label: muted ? 'UNMUTE' : 'MUTE ALL', y: H / 2 + 60 },
+  ];
+
+  for (let i = 0; i < items.length; i++) {
+    const sel = i === pauseMenuSel;
+    g.font = `${sel ? 'bold ' : ''}14px ${F}`;
+    g.fillStyle = sel ? C.gold : C.bone;
+    const prefix = sel ? '> ' : '  ';
+    const suffix = sel ? ' <' : '';
+    g.fillText(prefix + items[i].label + suffix, W / 2, items[i].y);
+    // Volume bars
+    if (i === 1 || i === 2) {
+      const vol = i === 1 ? sfxVol : musicVol;
+      const barW = 120, barX = W / 2 - barW / 2, barY = items[i].y + 12;
+      g.fillStyle = C.dark; g.fillRect(barX, barY, barW, 4);
+      g.fillStyle = sel ? C.gold : C.red; g.fillRect(barX, barY, Math.ceil(barW * vol), 4);
+    }
+  }
+
+  const isMob = 'ontouchstart' in window;
+  g.font = `10px ${F}`; g.fillStyle = C.mid;
+  g.fillText(isMob ? 'TAP OPTIONS TO ADJUST' : '[W/S] SELECT  [A/D] ADJUST  [ENTER] CONFIRM', W / 2, H / 2 + 100);
+  g.fillText(isMob ? '' : '[ESC] or [P] TO RESUME', W / 2, H / 2 + 115);
+}
+
+// ══════════════════════
 //  RENDER
 // ══════════════════════
 function render() {
@@ -2013,6 +2095,7 @@ function render() {
   if (state === 'menu')         drawMenu();
   else if (state === 'gameover') drawGameOver();
   else if (state === 'name')    drawNameEntry();
+  else if (state === 'paused')  drawPause();
   else                          drawGameplay();
   g.restore();
 
